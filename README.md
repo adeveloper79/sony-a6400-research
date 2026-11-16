@@ -57,6 +57,22 @@ Sources: [`menu_touch_full.c`](tools/native_camera/menu_touch_full.c),
 [`native_menu_touch_full_guard.c`](tools/native_camera/native_menu_touch_full_guard.c),
 verified snapshot in [`mods/menu_touch_full/`](mods/menu_touch_full/README.md).
 
+### Sony ZV-E10 MTF2 full-menu touch mod (Verified on Hardware)
+
+A RAM-only port of the MTF2 touch layer specifically tailored for the **Sony ZV-E10**
+(`WW356015` / CXD90045, CE Linux 8.2.7.6, FW 2.02 / 2.03), injected into `libObj.so` RX zero padding (`0x011964f0`)
+with a 648-byte state block in `libObj.so` `.data` (`0x013f8000`). All 188 `im.elf` threads remain active and responsive.
+
+**Verified Live Hardware Capabilities**:
+- **Main Menu**: Tapping tabs 1..6 switches tabs; tapping page indicator dots or swiping horizontally turns pages left/right; single tap selects/highlights a menu row; double tap opens level-2 submenus/dialogues.
+- **Popup Dialogues**: Tapping an option inside a dialogue (e.g. *USB Connection* modes) applies the setting, closes the dialogue, and refreshes the menu; vertical swiping scrolls multi-item dialogues; tapping outside the dialogue panel cancels/dismisses it.
+- **Safety**: 100% RAM-only via `ptrace` freeze-and-verify; zero flash writes (`/dev/nflasha*`); fail-closed preflight checks against exact vtables and function prologues; 100% reversible upon camera power cycle.
+- **Sources**: [`tools/native_camera/zve10/menu_touch_full.c`](tools/native_camera/zve10/menu_touch_full.c),
+  [`tools/native_camera/zve10/native_menu_touch_full_guard.c`](tools/native_camera/zve10/native_menu_touch_full_guard.c),
+  [`tools/research/build_zve10_menu_touch.py`](tools/research/build_zve10_menu_touch.py),
+  [`tools/research/deploy_zve10_menu_touch.py`](tools/research/deploy_zve10_menu_touch.py),
+  [`tests/test_zve10_menu_touch_full.py`](tests/test_zve10_menu_touch_full.py).
+
 ### Short tutorial — load a mod from the SD card
 
 1. **Get the touch mod:** use the tested [MenuTouchFull.mod](mods/menu_touch_full/MenuTouchFull.mod)

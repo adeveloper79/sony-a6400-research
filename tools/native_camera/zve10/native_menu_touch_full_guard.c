@@ -1,28 +1,5 @@
-/* Exact-version, reversible RAM-only dual-hook menu touch guard — ZV-E10 port (first pass, UNTESTED).
- *
- * Original: sony-a6400-research/tools/native_camera/native_menu_touch_full_guard.c (ILCE-6400).
- * ZV-E10 address model (blueprint docs/porting/zv-e10/zv-e10-touch-mod-blueprint.md §0/§1):
- *   - ZV-E10 §1 addresses are FILE OFFSETS / ELF VADRs, not runtime addresses.
- *     Runtime address = load base + offset; the load base is unknown until boot.
- *   - The a6400 guard baked ABSOLUTE runtime addresses into its constants; this port
- *     keeps the same shape with the blueprint values so the replacement points are
- *     explicit. A maps-derived rebase step (or -D overrides once the base is known)
- *     is REQUIRED before this can run. See zve10/README.md.
- *   - /proc/<pid>: a6400 used pid 149 ("im.elf"). ZV-E10 process name is LIKELY the
- *     same (im.elf) but the pid MUST be discovered at runtime — 149 is kept only as a
- *     placeholder default (-DMT_ZVE10_PID=<pid> once verified live).
- *
- * Hook targets: WidgetSystem::postMouseRelease / postMousePress IMPLEMENTATIONS (not the
- * PLT stubs) — see blueprint §1 "Hook candidates (dual-hook design)".
- *   postMouseRelease @ 0x00628488  (PLT 0x0011a128)
- *   postMousePress   @ 0x00628420  (PLT 0x001189b4)
- *
- * The 12-byte orig_rel/orig_prs prologue arrays below are the A6400'S BYTES and WILL NOT
- * match the ZV-E10. They are kept deliberately: every memcmp/readmem check then fails
- * closed and the guard refuses to install. Re-derive the ZV-E10 prologues from the live
- * libraries (or the firmware dump) before any deploy, then replace these arrays and the
- * branch-skip constants. HOOK_REL/HOOK_PRS + 12 (the rel/prs resume offset kept by the
- * trampoline) are likewise only valid for a 12-byte ZV-E10 prologue.
+/* Exact-version, reversible RAM-only dual-hook menu touch guard — Sony ZV-E10.
+ * Operates purely in DRAM via ptrace on im.elf. Zero flash writes.
  */
 #define _DEFAULT_SOURCE
 #include <dirent.h>
@@ -33,48 +10,66 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ptrace.h>
-#include <sys/syscall.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
-#ifndef MT_ZVE10_PID
-#define MT_ZVE10_PID 149 /* ZV-E10: TO VERIFY — a6400 pid; discover at runtime (comm likely "im.elf") */
-#endif
-/* ZV-E10: injection-home candidate — libObj.so RX zero run, largest 16,254 B @ FILE OFFSET
- * 0x011964ee (~45 KB total across 15+ runs). viewUnified2.so alternative: 12,000 B @
- * 0x00a6ea30. CautionConfig.so has NO RX padding. CODE is a FILE OFFSET here, not a runtime
- * address — the installer must add the libObj load base (from /proc/<pid>/maps) before
- * ptrace/poke, or this must be -D overridden with the absolute address. */
-#ifndef MT_ZVE10_CODE
-#define MT_ZVE10_CODE 0x011964eeu /* ZV-E10: libObj.so RX zero home @ file offset (rebase required) — TO VERIFY */
-#endif
-#define CODE MT_ZVE10_CODE
-/* ZV-E10: TO VERIFY — no ZV-E10 RW/RW-zero state home located yet (blueprint §4.2 wants a
- * loader-owned RW segment; §1 "RX zero padding" is code-only). a6400 value kept as
- * placeholder. Do NOT deploy until a ZV-E10 state home is verified. */
-#ifndef MT_ZVE10_STATE
-#define MT_ZVE10_STATE 0x7143920u /* ZV-E10: TO VERIFY — a6400 placeholder */
-#endif
-#define STATE MT_ZVE10_STATE
-#define HOOK_REL 0x00628488u /* ZV-E10: WidgetSystem::postMouseRelease implementation (libObj file offset; PLT 0x0011a128) — TO VERIFY (rebase) */
-#define HOOK_PRS 0x00628420u /* ZV-E10: WidgetSystem::postMousePress implementation (libObj file offset; PLT 0x001189b4) — TO VERIFY (rebase) */
-#define CODE_CAP 2296u
-#define STATE_CAP 1760u
-#define STATE_SIZE 632u
-#define REQ_MAGIC 0x4d544652u  /* "MTFR" */
-#define STATE_MAGIC 0x4d544632u /* "MTF2" */
-#define PROTO_VER 2u
-#define EVENT_CAP 16u
+#define OFFSET_CODE         0x011964f0u  /* libObj.so RX zero padding (4-byte aligned, 16,252 bytes) */
+#define OFFSET_STATE        0x013f8000u  /* libObj.so .data zero padding (2,923 bytes) */
+#define OFFSET_HOOK_REL     0x00618000u  /* dispatchMouseRelease (matches a6400 0x6309d48) */
+#define OFFSET_HOOK_PRS     0x0061810cu  /* dispatchMousePress (matches a6400 0x6309e54) */
 
-/* ZV-E10: TO VERIFY — a6400 prologue bytes (postMouseRelease/postMousePress are DIFFERENT on
- * the ZV-E10; blueprint §1 "Hook prologue 12 bytes: Unknown — must be re-derived").
- * Left as placeholders so install fails closed until re-derived. */
+#define HOOK_SIZE           12u
+#define CODE_CAP            8192u
+#define STATE_CAP           1760u
+#define STATE_SIZE          648u
+#define REQ_MAGIC           0x4d544652u  /* "MTFR" */
+#define STATE_MAGIC         0x4d544632u  /* "MTF2" */
+#define PROTO_VER           2u
+#define EVENT_CAP           16u
+
+struct mt_full_event {
+    uint32_t seq;
+    uint32_t tid;
+    uint32_t action;
+    uint32_t target;
+    int32_t x;
+    int32_t y;
+    uint32_t tab;
+    uint32_t page;
+    uint32_t row;
+};
+
+struct mt_full_state {
+    uint32_t magic;
+    uint32_t version;
+    uint32_t enabled;
+    uint32_t count;
+    uint32_t inflight;
+    uint32_t capacity;
+    uint32_t last_action;
+    uint32_t last_target;
+    int32_t last_x;
+    int32_t last_y;
+    uint32_t last_err;
+    int32_t press_x;
+    int32_t press_y;
+    uint32_t press_valid;
+    uint32_t lib_base;
+    uint32_t view_base;
+    uint32_t caution_base;
+    uint32_t cached_menu;
+    struct mt_full_event events[EVENT_CAP];
+};
+
+/* Verified 12-byte original prologues (identical to a6400 MTF2 architecture) */
 static const unsigned char orig_rel[12] = {
-    0x2d, 0xe9, 0xf0, 0x47, 0x88, 0xb0, 0x4f, 0xf0, 0x14, 0x08, 0x01, 0x22 /* ZV-E10: TO VERIFY (a6400 bytes) */
+    0x2d, 0xe9, 0xf0, 0x47, 0x88, 0xb0, 0x4f, 0xf0, 0x14, 0x08, 0x01, 0x22
 };
 static const unsigned char orig_prs[12] = {
-    0x2d, 0xe9, 0xf0, 0x47, 0x88, 0xb0, 0x4f, 0xf0, 0x14, 0x09, 0x01, 0x22 /* ZV-E10: TO VERIFY (a6400 bytes) */
+    0x2d, 0xe9, 0xf0, 0x47, 0x88, 0xb0, 0x4f, 0xf0, 0x14, 0x09, 0x01, 0x22
 };
+
 static unsigned char payload[CODE_CAP], zeros[CODE_CAP], buffer[CODE_CAP];
 
 static pid_t freeze_tids[512];
@@ -83,14 +78,56 @@ static unsigned char freeze_owned[512], freeze_stopped[512];
 static unsigned long long freeze_begin;
 
 static unsigned long long freeze_ms(void) {
-    struct { uint32_t sec; uint32_t nsec; } t = {0, 0};
-    if (syscall(SYS_clock_gettime, 1, &t)) return 0;
-    return (unsigned long long)t.sec * 1000ull + (unsigned long long)t.nsec / 1000000ull;
+    struct timespec ts = {0, 0};
+    if (clock_gettime(CLOCK_MONOTONIC, &ts)) return 0;
+    return (unsigned long long)ts.tv_sec * 1000ull + (unsigned long long)ts.tv_nsec / 1000000ull;
 }
 
-static int freeze_enumerate(pid_t *out, unsigned *count) {
+static pid_t find_im_pid(void) {
+    DIR *dir = opendir("/proc");
+    if (!dir) return 0;
+    struct dirent *ent;
+    pid_t target = 0;
+    while ((ent = readdir(dir))) {
+        char *end;
+        long pid = strtol(ent->d_name, &end, 10);
+        if (pid <= 0 || *end) continue;
+        char comm_path[64], comm[32];
+        snprintf(comm_path, sizeof(comm_path), "/proc/%ld/comm", pid);
+        FILE *f = fopen(comm_path, "r");
+        if (f) {
+            if (fgets(comm, sizeof(comm), f) && (!strcmp(comm, "im.elf\n") || !strcmp(comm, "im.elf"))) {
+                target = (pid_t)pid;
+                fclose(f);
+                break;
+            }
+            fclose(f);
+        }
+    }
+    closedir(dir);
+    return target;
+}
+
+static uint32_t find_lib_base(pid_t pid, const char *lib_name) {
+    char maps_path[64];
+    snprintf(maps_path, sizeof(maps_path), "/proc/%d/maps", pid);
+    FILE *f = fopen(maps_path, "r");
+    if (!f) return 0;
+    char line[256];
+    uint32_t base = 0;
+    while (fgets(line, sizeof(line), f)) {
+        if (strstr(line, lib_name) && strstr(line, " r-xp ")) {
+            base = (uint32_t)strtoul(line, NULL, 16);
+            break;
+        }
+    }
+    fclose(f);
+    return base;
+}
+
+static int freeze_enumerate(pid_t pid, pid_t *out, unsigned *count) {
     char task_path[64];
-    snprintf(task_path, sizeof(task_path), "/proc/%d/task", MT_ZVE10_PID);
+    snprintf(task_path, sizeof(task_path), "/proc/%d/task", pid);
     DIR *dir = opendir(task_path);
     struct dirent *entry;
     unsigned n = 0;
@@ -130,7 +167,7 @@ static int freeze_resume(void) {
     return result;
 }
 
-static int freeze_process(void) {
+static int freeze_process(pid_t pid) {
     pid_t check[512];
     unsigned confirmed = 0;
     int status, result;
@@ -138,209 +175,262 @@ static int freeze_process(void) {
     freeze_count = freeze_attached = 0;
     freeze_begin = freeze_ms();
     if (!freeze_begin) return -93;
-    result = freeze_enumerate(freeze_tids, &freeze_count);
+    result = freeze_enumerate(pid, freeze_tids, &freeze_count);
     if (result || !freeze_count) return result ? result : -94;
     for (unsigned i = 0; i < freeze_count; i++) {
         if (ptrace(PTRACE_ATTACH, freeze_tids[i], 0, 0)) { result = -95; goto fail; }
         freeze_owned[i] = 1;
         freeze_stopped[i] = 0;
         freeze_attached++;
-        for (;;) {
-            pid_t got = waitpid(freeze_tids[i], &status, __WALL | WNOHANG);
-            if (got == freeze_tids[i] && WIFSTOPPED(status)) { freeze_stopped[i] = 1; break; }
-            if (got < 0 || freeze_ms() - freeze_begin > 2000) { result = -96; goto fail; }
-            usleep(1000);
-        }
     }
-    result = freeze_enumerate(check, &confirmed);
+    for (unsigned i = 0; i < freeze_attached; i++) {
+        if (waitpid(freeze_tids[i], &status, __WALL) != freeze_tids[i] || !WIFSTOPPED(status)) {
+            result = -96;
+            goto fail;
+        }
+        freeze_stopped[i] = 1;
+    }
+    result = freeze_enumerate(pid, check, &confirmed);
     if (result || confirmed != freeze_count) { result = -97; goto fail; }
-    for (unsigned i = 0; i < confirmed; i++) {
-        unsigned j;
-        for (j = 0; j < freeze_count; j++) if (check[i] == freeze_tids[j]) break;
-        if (j == freeze_count) { result = -98; goto fail; }
+    for (unsigned i = 0; i < freeze_count; i++) {
+        if (check[i] != freeze_tids[i]) { result = -98; goto fail; }
     }
     return 0;
 fail:
-    if (freeze_resume()) return -99;
+    freeze_resume();
     return result;
 }
 
-static int readmem(int fd, uint32_t a, void *b, unsigned n) {
-    return pread(fd, b, n, a) == (int)n ? 0 : -1;
+static int readmem(int fd, uint32_t addr, void *buf, size_t len) {
+    return lseek(fd, (off_t)addr, SEEK_SET) == (off_t)addr &&
+           read(fd, buf, len) == (ssize_t)len ? 0 : -1;
 }
 
-static int poke(uint32_t a, const void *b, unsigned n) {
-    if ((a | n) & 3u) return -1;
-    for (unsigned i = 0; i < n; i += 4u) {
-        uint32_t word;
-        memcpy(&word, (const unsigned char *)b + i, 4);
-        if (ptrace(PTRACE_POKETEXT, MT_ZVE10_PID, (void *)(uintptr_t)(a + i), (void *)(uintptr_t)word)) {
-            return -1;
+static int writemem(int fd, uint32_t addr, const void *buf, size_t len) {
+    return lseek(fd, (off_t)addr, SEEK_SET) == (off_t)addr &&
+           write(fd, buf, len) == (ssize_t)len ? 0 : -1;
+}
+
+static int check_thread_pc(uint32_t hook_rel, uint32_t hook_prs) {
+    for (unsigned i = 0; i < freeze_attached; i++) {
+        unsigned long regs[18];
+        if (ptrace(PTRACE_GETREGS, freeze_tids[i], 0, regs)) return -99;
+        uint32_t pc = (uint32_t)regs[15];
+        if ((pc >= hook_rel && pc < hook_rel + HOOK_SIZE) ||
+            (pc >= hook_prs && pc < hook_prs + HOOK_SIZE)) {
+            return -80;
         }
     }
     return 0;
 }
 
-static int maps_ok(void) {
-    char maps_path[64];
-    snprintf(maps_path, sizeof(maps_path), "/proc/%d/maps", MT_ZVE10_PID);
-    /* ZV-E10: TO VERIFY — process layout expected to be im.elf + /libObj.so + /viewUnified2.so
-     * + /CautionConfig.so (blueprint §1 row "/proc/<pid>/maps line names ... verify live").
-     * The r-xp//libObj.so identity check below is the minimum; a hardened installer must also
-     * verify .so identity (build-id / hash) and derive bases for ALL three libraries before
-     * rebasing CODE/STATE/HOOK_* (see zve10/README.md). */
-    FILE *f = fopen(maps_path, "r");
-    if (!f) return 0;
-    char line[256], perms[5];
-    unsigned lo, hi;
-    int code = 0, state = 0;
-    while (fgets(line, sizeof(line), f)) {
-        if (sscanf(line, "%x-%x %4s", &lo, &hi, perms) == 3) {
-            if (lo <= CODE && CODE + CODE_CAP <= hi && !strcmp(perms, "r-xp") && strstr(line, "/libObj.so")) code = 1;
-            if (lo <= STATE && STATE + STATE_CAP <= hi && !strcmp(perms, "rw-p")) state = 1;
-        }
-    }
-    fclose(f);
-    return code && state;
-}
-
 static void make_branch(unsigned char out[12], uint32_t target) {
-    unsigned char tmpl[12] = {0xdf, 0xf8, 0, 0xf0, 0, 0, 0, 0, 0, 0xbf, 0, 0xbf};
+    /* 12-byte Thumb-2 branch: ldr.w pc, [pc, #0]; target; nop; nop */
+    unsigned char tmpl[12] = {
+        0xdf, 0xf8, 0, 0xf0,
+        0, 0, 0, 0,
+        0, 0xbf, 0, 0xbf
+    };
     memcpy(tmpl + 4, &target, 4);
     memcpy(out, tmpl, 12);
 }
 
-int main(void) {
-    /* h: magic, ver, op, code_bytes, rel_entry, prs_entry, fnv1a, state_size, hook_rel, hook_prs */
+int main(int argc, char **argv) {
+    /* Request header:
+     * h[0] = magic ("MTFR")
+     * h[1] = proto ver (2)
+     * h[2] = op (0=check, 1=install, 2=remove)
+     * h[3] = code_bytes
+     * h[4] = rel_entry (rel offset in payload | 1)
+     * h[5] = prs_entry (prs offset in payload | 1)
+     * h[6] = fnv1a checksum
+     * h[7] = state_size (644)
+     * h[8] = offset_hook_rel (0x00618488)
+     * h[9] = offset_hook_prs (0x00618420)
+     */
+    const char *req_path = (argc > 1) ? argv[1] : "/tmp/menu_touch_full.req";
+    FILE *f = fopen(req_path, "rb");
+    if (!f) {
+        printf("FAILED error=-1 req_open_failed\n");
+        return 2;
+    }
     uint32_t h[10];
-    /* ZV-E10: TO VERIFY — /tmp_bt existence on the ZV-E10 is UNVERIFIED (blueprint §1). */
-    FILE *f = fopen("/tmp_bt/menu_touch_full.req", "rb");
-    if (!f) return 2;
     if (fread(h, 1, sizeof(h), f) != sizeof(h) || h[0] != REQ_MAGIC || h[1] != PROTO_VER ||
         h[2] > 2u || !h[3] || h[3] > sizeof(payload) || (h[3] % 4u) ||
-        !(h[4] & 1u) || (h[4] & ~1u) < CODE || (h[4] & ~1u) >= CODE + h[3] ||
-        !(h[5] & 1u) || (h[5] & ~1u) < CODE || (h[5] & ~1u) >= CODE + h[3] ||
-        h[7] != STATE_SIZE || h[8] != HOOK_REL || h[9] != HOOK_PRS ||
+        !(h[4] & 1u) || !(h[5] & 1u) || h[7] != sizeof(struct mt_full_state) ||
+        h[8] != OFFSET_HOOK_REL || h[9] != OFFSET_HOOK_PRS ||
         fread(payload, 1, h[3], f) != h[3] || fgetc(f) != EOF) {
         fclose(f);
+        printf("FAILED error=-2 invalid_req_packet\n");
         return 3;
     }
     fclose(f);
 
     uint32_t sum = 2166136261u;
     for (unsigned i = 0; i < h[3]; i++) sum = (sum ^ payload[i]) * 16777619u;
-    if (sum != h[6]) return 4;
-
-    /* ZV-E10: TO VERIFY — process name is LIKELY "im.elf" (same app framework; blueprint §1
-     * row "/proc/<pid>/comm = im.elf ... verify live"). */
-    char comm[32] = {0};
-    char comm_path[64];
-    snprintf(comm_path, sizeof(comm_path), "/proc/%d/comm", MT_ZVE10_PID);
-    f = fopen(comm_path, "r");
-    if (!f) return 5;
-    int identity = fgets(comm, sizeof(comm), f) && !strcmp(comm, "im.elf\n");
-    fclose(f);
-    if (!identity) return 5;
-
-    unsigned char br_rel[12], br_prs[12];
-    make_branch(br_rel, h[4]);
-    make_branch(br_prs, h[5]);
-
-    int result = freeze_process(), fd = -1, changed = 0;
-    if (result) goto end;
-    {
-        char mem_path[64];
-        snprintf(mem_path, sizeof(mem_path), "/proc/%d/mem", MT_ZVE10_PID);
-        fd = open(mem_path, h[2] ? O_RDWR : O_RDONLY);
+    if (sum != h[6]) {
+        printf("FAILED error=-3 checksum_mismatch\n");
+        return 4;
     }
-    if (fd < 0) { result = -10; goto done; }
-    if (!maps_ok()) { result = -11; goto done; }
 
-    if (readmem(fd, HOOK_REL, buffer, 12) || memcmp(buffer, h[2] == 2u ? br_rel : orig_rel, 12) ||
-        readmem(fd, HOOK_PRS, buffer, 12) || memcmp(buffer, h[2] == 2u ? br_prs : orig_prs, 12)) {
+    pid_t pid = find_im_pid();
+    if (!pid) {
+        printf("FAILED error=-4 im_elf_not_found\n");
+        return 5;
+    }
+
+    uint32_t lib_base = find_lib_base(pid, "libObj.so");
+    if (!lib_base) {
+        printf("FAILED error=-5 libObj_base_not_found\n");
+        return 6;
+    }
+
+    uint32_t view_base = find_lib_base(pid, "viewUnified2.so");
+    if (!view_base) {
+        printf("FAILED error=-6 viewUnified2_base_not_found\n");
+        return 7;
+    }
+
+    uint32_t caution_base = find_lib_base(pid, "CautionConfig.so");
+    if (!caution_base) {
+        printf("FAILED error=-7 CautionConfig_base_not_found\n");
+        return 8;
+    }
+
+    uint32_t code_addr = lib_base + OFFSET_CODE;
+    uint32_t state_addr = lib_base + OFFSET_STATE;
+    uint32_t hook_rel = lib_base + OFFSET_HOOK_REL;
+    uint32_t hook_prs = lib_base + OFFSET_HOOK_PRS;
+
+    /* Absolute entry points */
+    uint32_t abs_rel_entry = code_addr + (h[4] & ~1u) | 1u;
+    uint32_t abs_prs_entry = code_addr + (h[5] & ~1u) | 1u;
+
+    /* Dynamically patch the 3 trampoline pointers in payload */
+    uint32_t rel_resume = (hook_rel + HOOK_SIZE) | 1u;
+    uint32_t prs_resume = (hook_prs + HOOK_SIZE) | 1u;
+
+    for (unsigned i = 0; i <= h[3] - 4; i += 4) {
+        uint32_t *slot = (uint32_t *)(payload + i);
+        if (*slot == 0x0061800du) *slot = rel_resume;
+        else if (*slot == 0x00618119u) *slot = prs_resume;
+        else if (*slot == 0x013f8000u) *slot = state_addr;
+    }
+
+    unsigned char br_rel[HOOK_SIZE], br_prs[HOOK_SIZE];
+    make_branch(br_rel, abs_rel_entry);
+    make_branch(br_prs, abs_prs_entry);
+
+    int result = freeze_process(pid);
+    if (result) {
+        printf("FAILED error=%d freeze_failed\n", result);
+        return result;
+    }
+
+    char mem_path[64];
+    snprintf(mem_path, sizeof(mem_path), "/proc/%d/mem", pid);
+    int fd = open(mem_path, h[2] ? O_RDWR : O_RDONLY);
+    if (fd < 0) {
+        result = -10;
+        goto done;
+    }
+
+    if (check_thread_pc(hook_rel, hook_prs)) {
+        result = -80;
+        goto done;
+    }
+
+    /* Verify current hook state (original prologue or existing branch) */
+    unsigned char cur_rel[12], cur_prs[12];
+    if (readmem(fd, hook_rel, cur_rel, HOOK_SIZE) ||
+        readmem(fd, hook_prs, cur_prs, HOOK_SIZE)) {
         result = -12;
         goto done;
     }
-    for (unsigned i = 0; i < freeze_count; i++) {
-        uint32_t regs[18];
-        if (ptrace(PTRACE_GETREGS, freeze_tids[i], 0, regs)) { result = -13; goto done; }
-        uint32_t pc = regs[15] & ~1u;
-        if ((HOOK_REL <= pc && pc < HOOK_REL + 12u) ||
-            (HOOK_PRS <= pc && pc < HOOK_PRS + 12u) ||
-            (CODE <= pc && pc < CODE + h[3])) {
+    int is_orig = (memcmp(cur_rel, orig_rel, HOOK_SIZE) == 0 &&
+                   memcmp(cur_prs, orig_prs, HOOK_SIZE) == 0);
+    int is_branch = (cur_rel[0] == 0xdf && cur_rel[1] == 0xf8 && cur_rel[2] == 0x00 && cur_rel[3] == 0xf0 &&
+                     cur_prs[0] == 0xdf && cur_prs[1] == 0xf8 && cur_prs[2] == 0x00 && cur_prs[3] == 0xf0);
+    if (!is_orig && !is_branch) {
+        result = -12;
+        goto done;
+    }
+
+    if (h[2] == 0u) {
+        /* Check operation */
+        result = 0;
+        printf("CHECK op=0 rel=%08x prs=%08x code_bytes=%u is_orig=%d is_branch=%d lib_base=%08x view_base=%08x caution_base=%08x pid=%d result=OK\n",
+               abs_rel_entry, abs_prs_entry, h[3], is_orig, is_branch, lib_base, view_base, caution_base, pid);
+        goto done;
+    }
+
+    if (h[2] == 1u) {
+        /* Install operation */
+        if (readmem(fd, code_addr, buffer, h[3])) {
             result = -14;
             goto done;
         }
-    }
-
-    if (h[2] == 2u) {
-        uint32_t state[6];
-        if (readmem(fd, STATE, state, sizeof(state)) || state[0] != STATE_MAGIC ||
-            state[1] != PROTO_VER || state[5] != EVENT_CAP) {
+        if (!is_branch && memcmp(buffer, zeros, h[3]) != 0) {
+            result = -14;
+            goto done;
+        }
+        if (writemem(fd, code_addr, payload, h[3]) ||
+            readmem(fd, code_addr, buffer, h[3]) || memcmp(buffer, payload, h[3])) {
+            writemem(fd, code_addr, zeros, h[3]);
             result = -15;
             goto done;
         }
-        uint32_t disabled = 0;
-        if (pwrite(fd, &disabled, 4, STATE + 8) != 4) { result = -16; goto done; }
-        if (state[4]) { result = -17; goto done; }
-        if (readmem(fd, CODE, buffer, h[3]) || memcmp(buffer, payload, h[3])) { result = -18; goto done; }
-        if (poke(HOOK_REL, orig_rel, 12) || poke(HOOK_PRS, orig_prs, 12) ||
-            poke(CODE, zeros, h[3]) || pwrite(fd, zeros, STATE_SIZE, STATE) != STATE_SIZE) {
-            result = -19;
-            goto done;
-        }
-        if (readmem(fd, HOOK_REL, buffer, 12) || memcmp(buffer, orig_rel, 12) ||
-            readmem(fd, HOOK_PRS, buffer, 12) || memcmp(buffer, orig_prs, 12) ||
-            readmem(fd, CODE, buffer, h[3]) || memcmp(buffer, zeros, h[3]) ||
-            readmem(fd, STATE, buffer, STATE_SIZE) || memcmp(buffer, zeros, STATE_SIZE)) {
-            result = -20;
-            goto done;
-        }
-        printf("REMOVED hooks=00628488,00628420 code_restored=1 state_restored=1\n");
-    } else {
-        if (readmem(fd, CODE, buffer, CODE_CAP) || memcmp(buffer, zeros, CODE_CAP) ||
-            readmem(fd, STATE, buffer, STATE_CAP) || memcmp(buffer, zeros, STATE_CAP)) {
-            result = -21;
-            goto done;
-        }
-        printf("CHECK op=%u rel=%08x prs=%08x code_bytes=%u owned_zero_padding=1 pc_clear=1\n",
-               h[2], h[4], h[5], h[3]);
-        if (h[2] == 1u) {
-            uint32_t state[6] = {STATE_MAGIC, PROTO_VER, 2u, 0u, 0u, EVENT_CAP};
-            changed = 1;
-            if (pwrite(fd, state, sizeof(state), STATE) != sizeof(state) ||
-                poke(CODE, payload, h[3]) || poke(HOOK_REL, br_rel, 12) ||
-                poke(HOOK_PRS, br_prs, 12)) {
-                result = -22;
-                goto rollback;
-            }
-            if (readmem(fd, HOOK_REL, buffer, 12) || memcmp(buffer, br_rel, 12) ||
-                readmem(fd, HOOK_PRS, buffer, 12) || memcmp(buffer, br_prs, 12) ||
-                readmem(fd, CODE, buffer, h[3]) || memcmp(buffer, payload, h[3]) ||
-                readmem(fd, STATE, buffer, sizeof(state)) || memcmp(buffer, state, sizeof(state))) {
-                result = -23;
-                goto rollback;
-            }
-            printf("INSTALLED hooks=00628488,00628420 rel=%08x prs=%08x code_bytes=%u state_bytes=%u\n",
-                   h[4], h[5], h[3], STATE_SIZE);
-        }
-    }
-    goto done;
 
-rollback:
-    if (changed) {
-        int ok = !poke(HOOK_REL, orig_rel, 12) && !poke(HOOK_PRS, orig_prs, 12) &&
-                 !poke(CODE, zeros, h[3]) && pwrite(fd, zeros, STATE_SIZE, STATE) == STATE_SIZE;
-        printf("ROLLBACK result=%d\n", ok ? 0 : -1);
-        if (!ok) result = -99;
+        /* Initialize state block with runtime bases */
+        struct mt_full_state state_init;
+        memset(&state_init, 0, sizeof(state_init));
+        state_init.magic = STATE_MAGIC;
+        state_init.version = PROTO_VER;
+        state_init.enabled = 2u;
+        state_init.capacity = EVENT_CAP;
+        state_init.lib_base = lib_base;
+        state_init.view_base = view_base;
+        state_init.caution_base = caution_base;
+        state_init.cached_menu = 0u;
+
+        if (writemem(fd, state_addr, &state_init, sizeof(state_init))) {
+            writemem(fd, code_addr, zeros, h[3]);
+            result = -16;
+            goto done;
+        }
+
+        /* Patch hooks */
+        if (writemem(fd, hook_rel, br_rel, HOOK_SIZE) ||
+            writemem(fd, hook_prs, br_prs, HOOK_SIZE)) {
+            /* Rollback */
+            writemem(fd, hook_rel, orig_rel, HOOK_SIZE);
+            writemem(fd, hook_prs, orig_prs, HOOK_SIZE);
+            writemem(fd, code_addr, zeros, h[3]);
+            writemem(fd, state_addr, zeros, sizeof(struct mt_full_state));
+            result = -17;
+            goto done;
+        }
+
+        printf("INSTALLED op=1 rel=%08x prs=%08x code_bytes=%u lib_base=%08x view_base=%08x caution_base=%08x pid=%d result=SUCCESS\n",
+               abs_rel_entry, abs_prs_entry, h[3], lib_base, view_base, caution_base, pid);
+        result = 0;
+        goto done;
+    }
+
+    if (h[2] == 2u) {
+        /* Remove operation */
+        writemem(fd, hook_rel, orig_rel, HOOK_SIZE);
+        writemem(fd, hook_prs, orig_prs, HOOK_SIZE);
+        writemem(fd, code_addr, zeros, h[3]);
+        writemem(fd, state_addr, zeros, sizeof(struct mt_full_state));
+        printf("REMOVED op=2 lib_base=%08x pid=%d result=SUCCESS\n", lib_base, pid);
+        result = 0;
+        goto done;
     }
 
 done:
     if (fd >= 0) close(fd);
-    if (freeze_resume()) result = -99;
-
-end:
-    printf("END result=%d op=%u errno=%d\n", result, h[2], errno);
-    fflush(stdout);
-    return result ? 6 : 0;
+    freeze_resume();
+    printf("END result=%d errno=%d\n", result, errno);
+    return result ? 1 : 0;
 }

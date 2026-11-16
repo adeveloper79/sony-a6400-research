@@ -47,6 +47,9 @@ ZVE10_LIBUSBCMD_SHA256 = (
 DEFAULT_PAYLOAD_DAEMON = "devcrashday_a6400/a6400_usb_debugd.elf"
 DEFAULT_PAYLOAD_LAUNCHER = "devcrashday_a6400/hook/usb_debug_launcher.so"
 
+ZVE10_PAYLOAD_DAEMON = "artifacts/native/zve10-usb-debugger/zve10_usb_debugd.elf"
+ZVE10_PAYLOAD_LAUNCHER = "artifacts/native/zve10-usb-debugger/usb_debug_launcher.so"
+
 DEBUGGER_RELEASE_REPO = "ivica00/sony-a6400-research"
 DEBUGGER_RELEASE_TAG = "usb-debugger-binaries-v1"
 PAYLOAD_ASSETS: Mapping[str, Mapping[str, object]] = {
@@ -61,6 +64,18 @@ PAYLOAD_ASSETS: Mapping[str, Mapping[str, object]] = {
         "size": 6284,
         "sha256": "a6f368cc3ce4efc00c1b4f094271a0b99aebba9a7940492c60dd7c50033fa5e4",
         "url": f"https://github.com/{DEBUGGER_RELEASE_REPO}/releases/download/{DEBUGGER_RELEASE_TAG}/usb_debug_launcher.so",
+    },
+    ZVE10_PAYLOAD_DAEMON: {
+        "filename": "zve10_usb_debugd.elf",
+        "size": 10436,
+        "sha256": "cba3616906690c724a5e2716df575b015c6613bed4876598aad2cd66f8cdc33a",
+        "url": "",
+    },
+    ZVE10_PAYLOAD_LAUNCHER: {
+        "filename": "usb_debug_launcher.so",
+        "size": 4436,
+        "sha256": "2b15069109291ffbafd4aca4a8e657b1b4675fa82535ac4600869dbd0712af73",
+        "url": "",
     },
 }
 PMCA_ARCHIVE_URL = "https://github.com/ma1co/Sony-PMCA-RE/archive/refs/heads/master.zip"
@@ -140,8 +155,8 @@ USB_DEBUGGER_TARGETS: Mapping[str, DebuggerTargetSpec] = {
         ),
         libusbcmd_size=ZVE10_LIBUSBCMD_SIZE,
         libusbcmd_sha256=ZVE10_LIBUSBCMD_SHA256,
-        payload_daemon=DEFAULT_PAYLOAD_DAEMON,
-        payload_launcher=DEFAULT_PAYLOAD_LAUNCHER,
+        payload_daemon=ZVE10_PAYLOAD_DAEMON,
+        payload_launcher=ZVE10_PAYLOAD_LAUNCHER,
         notes=(
             "Target for Sony ZV-E10 (FW 2.00-2.03, CE Linux 8.2.7.6): libusbcmd.so is "
             "SHA-identical to ILCE-6400A 1.01; usb_extcmd.ko is 14,796 B (same toolchain family). "
