@@ -3,7 +3,7 @@
 **Goal:** port the a6400 (`ILCE-6400`) `MenuTouchFull`/`MTF2` full-menu touch mod to the **ZV-E10**.
 **Status:** static RE complete for all port-checklist items; **no camera has been touched; no firmware modified.**
 **Sources:** ZV-E10 2.03 official firmware package (`D:\Downloads\Update_ZVE10V203.exe` → decrypted with fwtool) + full on-device flash dump (`zv-e10-nflasha`, read-only pull via service shell) — see `FINDINGS-ZVE10.md`.
-**Working files:** `<workspace>\zv-e10-analysis\viewUnified2_RE-report.md`, `zv-e10-flasha15\zv-e10-libObj-re-report.md`, Ghidra project `F:\ghidra\zv_e10_proj` (libObj.so import in progress).
+**Working files:** `<workspace>\zv-e10-analysis\viewUnified2_RE-report.md`, `<workspace>\zv-e10-libObj-RE-report.md`, Ghidra project `F:\ghidra\zv_e10_proj` (both `viewUnified2.so` and `libObj.so` imported and analyzed; MCP server config at `F:\ghidra\zv_e10_proj\.mcp.json` / `start_mcp.bat`).
 
 ## 0. Framework identity — the mod is portable *in principle*
 
@@ -34,6 +34,7 @@ Same Sony BIONZ-X / CE Linux 8 / ARM Thumb-2 framework, same three libraries, sa
 | CmnViewSettingNode vtable | CautionConfig | **VA `0x00fab968`** (file `0xfa3968`), RTTI `_ZTI18CmnViewSettingNode` @ `0xfab954`, typeinfo name `0xdd74dc` | High |
 | CmnViewSettingNode methods (idx with a6400 mapping) | slot 24/48 | slot 24 `getLayerDepth`, idx46 `setItemSelectedEv`, idx47 `setItemSelectedByIndex`, **idx48 `setItemSelectedBySRNum`** (file `0xb8e60c`), idx49 `setItemSelectedByDiffSRNum`, idx56 `updateSettingNode`, idx64 `updateSRNumEv` (+0x100) | High |
 | Widget hit-test / binding / refresh / popup_* / main_state / cancel_popup / confirm_popup / apply_popup | libObj/viewUnified2 | `isHit`≈`Widget::isHit` (TBD), refresh = PAS vtable idx108 `0x8629f8` + `0x2f5998`; popup primitives in viewUnified2.so (exports `PAS_MenuListPopup::moveHlt` etc.) | Partial |
+| **Hook candidates (dual-hook design)** | `HOOK_REL`/`HOOK_PRS` WidgetSystem::release/press | **`postMouseRelease @ 0x00628488`** (implementation; `0x0011a128` = PLT stub) and **`postMousePress @ 0x00628420`** (implementation; `0x001189b4` = PLT stub) — same shape as the a6400's hook targets, full prologues, `WidgetSystem` symbols exported in libObj.so | High |
 | RX padding for loader (libObj owns zero RX in .text!) | libObj RX pad | **`.rodata` 16,254 B @ `0x011964ee`** (sub-range `0x01196500–0x0119a000`, ~15.1 KB); runner-up `.rodata` `0x011956e6` (3,478 B). **No executable zero padding in `.text`/`.ARM.exidx`** — loader home must be chosen differently (`.rodata` region is R+X but unverified as dead) or carve a fresh RX segment | High (the constraint is verified) |
 | `/proc/<pid>/maps` line names | `im.elf`, `/libObj.so` | Same expected process layout (`im.elf`, `/libObj.so`, `/viewUnified2.so`, `/CautionConfig.so`) — verify live | Medium |
 | `/tmp_bt/menu_touch_full.req` transport | a6400 | ZV-E10 `/tmp_bt` existence unverified | Unknown |
