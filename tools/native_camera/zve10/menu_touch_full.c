@@ -22,6 +22,7 @@
 #define MT_OFFSET_INHERITED  0x00613bd1u  /* Widget::calcFinalMode */
 #define MT_OFFSET_CREATE_EVT 0x0012c651u  /* Event factory: create_event(ulong id, u8 type) */
 #define MT_OFFSET_PUSH_EVT   0x0012c62du  /* Event dispatcher: push_event(Event* ev) */
+#define MT_OFFSET_P_VIEW_MGR 0x0149221cu  /* pViewManager (.bss in libObj.so) */
 
 /* viewUnified2.so relative offsets */
 #define MT_OFFSET_VTV_PAS_TAB 0x00c09e28u /* PAS_MenuListTab vtable addr pt (verified live: 0x168d8e28 - 0x15ccf000) */
@@ -30,6 +31,8 @@
 #define MT_OFFSET_POPUP_NEXT  0x00861b79u /* PAS_MenuListTab::setPopupNext */
 #define MT_OFFSET_REFRESH     0x008629f9u /* PAS_MenuListTab::refresh */
 #define MT_OFFSET_CLOSE_POPUP 0x008620e1u /* PAS_MenuListTab::closeMenuPopup (closes popup, restores main_state=2, refreshes menu) */
+#define MT_OFFSET_VTV_SETTING_MENU 0x00ba2c8cu /* ViewSettingMenu primary vtable addr pt (viewUnified2.so) */
+#define MT_OFFSET_ACTION_DISPATCH  0x0030412bu /* ViewSettingMenu::ProductAction(this, action_id) */
 
 /* CautionConfig.so relative offsets */
 #define MT_OFFSET_VTV_NODE    0x00fab968u /* CmnViewSettingNode vtable addr pt */
@@ -159,6 +162,37 @@ static void push_async_event(volatile struct mt_full_state *s, uint32_t event_id
         return;
     }
     push_evt(ev);
+}
+
+static uint32_t find_setting_menu_view(volatile struct mt_full_state *s, uint32_t menu) {
+    uint32_t vid = rd32(menu, 0x14cu);
+    uint32_t vm = rd32(s->lib_base + MT_OFFSET_P_VIEW_MGR, 0u);
+    if (!vm) {
+        return 0u;
+    }
+    int cnt = (int)rd32(vm, 0u);
+    uint32_t entries = rd32(vm, 0x20u);
+    if (!entries || cnt <= 0 || cnt > 128) {
+        return 0u;
+    }
+    uint32_t vtv = s->view_base + MT_OFFSET_VTV_SETTING_MENU;
+    for (int i = 0; i < cnt; i++) {
+        uint32_t ent = entries + (uint32_t)i * 16u;
+        uint32_t vwrap = rd32(ent, 4u);
+        if (!vwrap || rd32(ent, 8u) != vid) {
+            continue;
+        }
+        if (rd32(vwrap, 0u) == vtv) {
+            return vwrap;
+        }
+        uint32_t inner = rd32(vwrap, 0x18u);
+        if (inner && rd32(inner, 0u) == vtv) {
+            return inner;
+        }
+        /* Fallback: if vid matched, vwrap is our owning view instance */
+        return vwrap;
+    }
+    return 0u;
 }
 
 static void handle_popup_touch(volatile struct mt_full_state *s, uint32_t menu,
@@ -463,12 +497,23 @@ static void handle_menu_touch(volatile struct mt_full_state *s, uint32_t mouse) 
                         is_popup = 1;
                     }
                 }
+                set_selected_index(page_node, r + 1u);
                 *(volatile uint32_t *)(menu + 0x1f8u) = r;
                 *(volatile uint32_t *)(menu + 0x1fcu) = r;
+                *(volatile uint8_t *)(menu + 0x1d8u) = 0;
+
                 if (is_popup) {
                     enter_selected(menu, leaf);
                 } else {
-                    push_async_event(s, 0x15010052u, 4u);
+                    uint32_t sm_view = find_setting_menu_view(s, menu);
+                    if (sm_view) {
+                        s->last_err = 110u; /* Action 11 dispatched */
+                        void (*action)(uint32_t, int) = (void *)(s->view_base + MT_OFFSET_ACTION_DISPATCH);
+                        action(sm_view, 11);
+                    } else {
+                        s->last_err = 111u; /* sm_view not found */
+                        push_async_event(s, 0x15010052u, 2u);
+                    }
                 }
                 record_event(s, MT_ACT_ROW_ENTER, r + 1u, x, y, (uint32_t)is_popup, page_sel, row_sel);
             }

@@ -64,7 +64,7 @@ A RAM-only port of the MTF2 touch layer specifically tailored for the **Sony ZV-
 with a 648-byte state block in `libObj.so` `.data` (`0x013f8000`). All 188 `im.elf` threads remain active and responsive.
 
 **Verified Live Hardware Capabilities**:
-- **Main Menu**: Tapping tabs 1..6 switches tabs; tapping page indicator dots or swiping horizontally turns pages left/right; single tap selects/highlights a menu row; double tap opens both level-2 dropdown popups (via synchronous `openLevel2Popup`) and submenus/actions such as *Version*, *Display Media Info*, and *Format* (via async `KEY_ENTER` event dispatch to `ViewSettingMenu`).
+- **Main Menu**: Tapping tabs 1..6 switches tabs; tapping page indicator dots or swiping horizontally turns pages left/right; single tap selects/highlights a menu row; double tap opens both level-2 dropdown popups (via synchronous `openLevel2Popup`) and submenus/actions such as *Version*, *Display Media Info*, and *Format* (via direct `ViewSettingMenu::ProductAction` Action 11 view transition dispatch).
 - **Popup Dialogues**: Tapping an option inside a dialogue (e.g. *USB Connection* modes) applies the setting, closes the dialogue, and refreshes the menu; vertical swiping scrolls multi-item dialogues; tapping outside the dialogue panel cancels/dismisses it.
 - **Safety**: 100% RAM-only via `ptrace` freeze-and-verify; zero flash writes (`/dev/nflasha*`); fail-closed preflight checks against exact vtables and function prologues; 100% reversible upon camera power cycle.
 - **Sources**: [`tools/native_camera/zve10/menu_touch_full.c`](tools/native_camera/zve10/menu_touch_full.c),
