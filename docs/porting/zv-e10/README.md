@@ -22,7 +22,7 @@ running — a port of the a6400's RAM-only touch mod (`MenuTouchFull`) to it.
 | Main kernel (Sony CE Linux 8.2.7.6, `3.0.27_nl-rt106+`, GCC 4.5.1) | ✅ 24,519 symbols decoded |
 | On-device read-only dump (service shell) | ✅ `/dev/nflasha` (1.95 GB, 30 partitions), `/dev/nflashaB0` (4 MB **EXBL** "Astra LPDDR3 Initialize Ver.40.00.01", `V85.00.03`), `/dev/nflashaB1` (zeros) |
 | Updater kernel boots in Unicorn CXD90045 machine | ✅ reaches BusyBox `/bin/ash`; `uname -a` prints correctly (offline, `zv_e10_boot.py`) |
-| Touch-mod RE (viewUnified2.so, libObj.so, CautionConfig.so) | ✅ complete — 148-case TBH Action dispatcher (idx75, case 1 = enter, cases 2–5 = move dirs 1/0/3/2); `Action1 0x304114`; `openLevel2Popup` `0x86292c`; `ViewSettingMenu` vtable `0xbaabb0`; `EventManager::push 0x008a1794`; `g_pEvtMgr` .bss `0x014920e0`; `CmnViewSettingNode` vtable `0x00fab960` (CautionConfig.so) |
+| Touch-mod RE (viewUnified2.so, libObj.so, CautionConfig.so) | ✅ complete — **RX zero padding exists: ~45 KB @ libObj.so, ~30 KB @ viewUnified2.so**, largest run 16,254 B @ `0x011964ee`; 148-case TBH Action dispatcher (idx75, case 1 = enter, cases 2–5 = move dirs 1/0/3/2); `Action1 0x304114`; `openLevel2Popup` `0x86292c`; `ViewSettingMenu` vtable `0xbaabb0`; `EventManager::push 0x008a1794`; `g_pEvtMgr` .bss `0x014920e0`; `CmnViewSettingNode` vtable `0x00fab960` (CautionConfig.so) |
 | Native USB debugger qualification | ❌ **not compatible** — `usb_extcmd.ko` (14,796 B, norm `1083cadd…`) and `libusbcmd.so` (15,996 B) differ from the ILCE-6400/7C pair (norm `9d7c97bd…`) |
 | Onboarding bundle for the debugger author | ✅ `ZV-E10-FW2.02-20261116-134044.zip` (drivers + libc + identity; `/proc/*` reads return 0 bytes — Senser file channel cannot read procfs) |
 | `CmnViewSettingNode` vtable (CautionConfig.so) | ✅ `0xfab960` (addr pt `0xfab968`); idx48 = `setItemSelectedBySRNum` |
@@ -76,8 +76,9 @@ USB debugger** — which is exactly what the touch-mod install/deploy path requi
 
 ## Known limitations
 
-- `libObj.so`'s 16,254-byte RX zero run is in `.rodata`, not `.text` — the loader
-  injection home needs a new approach before the mod can be installed
+- RX zero padding exists in libObj.so (~45 KB, largest 16,254 B @ `0x011964ee`) and
+  viewUnified2.so (~30 KB) — the a6400's injection pattern applies. Whether the
+  zeros are dead data cannot be proven without live testing on a camera.
 - The ZV-E10's vlog-focused menu layout may not accommodate a 7th "Mods" tab design
   (the a6400's design fits its menu; the ZV-E10 needs a UX rethink)
 - Load bases (runtime) are not knowable offline; every offset here is `base + file`
