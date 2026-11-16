@@ -66,12 +66,15 @@ with a 648-byte state block in `libObj.so` `.data` (`0x013f8000`). All 188 `im.e
 **Verified Live Hardware Capabilities**:
 - **Main Menu**: Tapping tabs 1..5 switches tabs; tapping page indicator dots or swiping horizontally turns pages left/right; single tap selects/highlights a menu row; double tap opens level-2 dropdown popups (via synchronous `openLevel2Popup`, verified live on *USB Connection*).
 - **Popup Dialogues**: Tapping an option inside a dropdown dialogue applies the setting, closes the dialogue, and refreshes the menu; vertical swiping scrolls multi-item dialogues; tapping outside the dialogue panel cancels/dismisses it.
+- **Fn (Function) Menu in Live Preview**: When physical `Fn` is pressed in shooting mode:
+  - Tapping any of the 12 tiles (2x6 grid across the lower display area) selects and highlights that tile (`FN_SELECT`), updating the native focus frame on screen.
+  - Tapping the highlighted tile or double-tapping any tile enters/opens its setting dialogue (`FN_ENTER`, via native `KEY_ENTER` event queue dispatch).
+  - Tapping outside the Fn menu grid on the upper liveview screen (`y < 260`) cancels and dismisses the Fn overlay (`FN_CANCEL`, via native `KEY_FN` event).
 - **Safety**: 100% RAM-only via `ptrace` freeze-and-verify; zero flash writes (`/dev/nflasha*`); fail-closed preflight checks against exact vtables and function prologues; 100% reversible upon camera power cycle.
 
 **Current Limitations / Work in Progress**:
-- **Submenus & Action Items**: Double-tapping action items and submenus (*Version*, *Display Media Info*, *Format*, etc.) currently highlights the row but does not transition into the dedicated subview; research in progress.
+- **Submenus & Action Items**: Double-tapping action items and submenus (*Version*, *Display Media Info*, *Format*, etc.) highlights the row but does not open the dedicated subview view; documented and research in progress.
 - **My Menu (Tab 6)**: Touch input on Tab 6 is not functional (matches upstream a6400 limitation).
-- **Fn (Function) Menu**: Touch support for the Fn key overlay menu during live preview/shooting is under active investigation.
 - **Sources**: [`tools/native_camera/zve10/menu_touch_full.c`](tools/native_camera/zve10/menu_touch_full.c),
   [`tools/native_camera/zve10/native_menu_touch_full_guard.c`](tools/native_camera/zve10/native_menu_touch_full_guard.c),
   [`tools/research/build_zve10_menu_touch.py`](tools/research/build_zve10_menu_touch.py),

@@ -184,6 +184,9 @@ def build_artifacts():
             "popup_select",
             "popup_scroll",
             "popup_cancel",
+            "fn_select",
+            "fn_enter",
+            "fn_cancel",
         ],
         "deployed": False,
     }
