@@ -20,10 +20,8 @@
 #define MT_OFFSET_LOOKUP     0x005f05afu  /* WidgetLayouter::getWidget */
 #define MT_OFFSET_IS_HIT     0x00613335u  /* Widget::isHit */
 #define MT_OFFSET_INHERITED  0x00613bd1u  /* Widget::calcFinalMode */
-#define MT_OFFSET_EVTMGR     0x014920e0u  /* g_pEvtMgr (.bss) */
-#define MT_OFFSET_EVT_CTOR   0x008a01e9u  /* Event::Event(ulong, u8, u8) */
-#define MT_OFFSET_EVT_PUSH   0x008a1795u  /* EventManager::push(Event*, bool) */
-#define MT_OFFSET_OP_NEW     0x00108e0cu  /* _Znwj ARM PLT stub */
+#define MT_OFFSET_CREATE_EVT 0x0012c651u  /* Event factory: create_event(ulong id, u8 type) */
+#define MT_OFFSET_PUSH_EVT   0x0012c62du  /* Event dispatcher: push_event(Event* ev) */
 
 /* viewUnified2.so relative offsets */
 #define MT_OFFSET_VTV_PAS_TAB 0x00c09e28u /* PAS_MenuListTab vtable addr pt (verified live: 0x168d8e28 - 0x15ccf000) */
@@ -151,20 +149,16 @@ static void sync_refresh(volatile struct mt_full_state *s, uint32_t menu) {
 }
 
 static void push_async_event(volatile struct mt_full_state *s, uint32_t event_id, uint8_t ev_type) {
-    uint32_t lib = s->lib_base;
-    uint32_t mgr = rd32(lib + MT_OFFSET_EVTMGR, 0u);
-    if (!mgr || !event_id) {
+    if (!event_id) {
         return;
     }
-    void *(*op_new)(uint32_t) = (void *)(lib + MT_OFFSET_OP_NEW);
-    void (*ev_ctor)(void *, uint32_t, uint8_t, uint8_t) = (void *)(lib + MT_OFFSET_EVT_CTOR);
-    void (*evmgr_push)(uint32_t, void *, uint32_t) = (void *)(lib + MT_OFFSET_EVT_PUSH);
-    void *ev = op_new(16u);
+    void *(*create_evt)(uint32_t, uint8_t) = (void *)(s->lib_base + MT_OFFSET_CREATE_EVT);
+    void (*push_evt)(void *) = (void *)(s->lib_base + MT_OFFSET_PUSH_EVT);
+    void *ev = create_evt(event_id, ev_type);
     if (!ev) {
         return;
     }
-    ev_ctor(ev, event_id, ev_type, 1u);
-    evmgr_push(mgr, ev, 1u);
+    push_evt(ev);
 }
 
 static void handle_popup_touch(volatile struct mt_full_state *s, uint32_t menu,
@@ -461,14 +455,22 @@ static void handle_menu_touch(volatile struct mt_full_state *s, uint32_t mouse) 
                 record_event(s, MT_ACT_ROW_SELECT, r + 1u, x, y, tab_sel, page_sel, row_sel);
             } else {
                 uint32_t leaf = 0;
+                int is_popup = 0;
                 if (indexed_child(page_node, r + 1u, &leaf) == 1 && leaf) {
-                    *(volatile uint32_t *)(menu + 0x1f8u) = r;
-                    *(volatile uint32_t *)(menu + 0x1fcu) = r;
+                    int (*get_selectable)(uint32_t, int *) = (void *)rd32(rd32(leaf, 0u), 0x10u);
+                    int sel_count = 0;
+                    if (get_selectable && get_selectable(leaf, &sel_count) == 1 && sel_count > 0) {
+                        is_popup = 1;
+                    }
+                }
+                *(volatile uint32_t *)(menu + 0x1f8u) = r;
+                *(volatile uint32_t *)(menu + 0x1fcu) = r;
+                if (is_popup) {
                     enter_selected(menu, leaf);
                 } else {
-                    s->last_err = 4u;
+                    push_async_event(s, 0x15010052u, 4u);
                 }
-                record_event(s, MT_ACT_ROW_ENTER, r + 1u, x, y, 0u, page_sel, row_sel);
+                record_event(s, MT_ACT_ROW_ENTER, r + 1u, x, y, (uint32_t)is_popup, page_sel, row_sel);
             }
             return;
         }
