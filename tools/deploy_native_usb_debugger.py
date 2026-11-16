@@ -37,6 +37,8 @@ def upload_and_verify_debugger(
     manifest: dict,
 ) -> None:
     """Upload debugger binaries to ``/setting`` and update ``/etc/ld.so.preload``."""
+    from tools.setup_usb_debugger import ensure_payload_binaries
+    ensure_payload_binaries(spec, root=ROOT)
     for local, remote in [
         (spec.payload_daemon, '/setting/a6400_usb_debugd.elf'),
         (spec.payload_launcher, '/setting/usb_debug_launcher.so'),

@@ -623,10 +623,10 @@ def run_gui():
             nb.select(single)
     tree.bind('<Double-1>', on_double)
 
-    # --- body onboarding tab (unqualified bodies, e.g. ZV-E10)
+    # --- body onboarding tab (unqualified bodies)
     ob = ttk.Frame(nb, padding=10)
     nb.add(ob, text='Body onboarding')
-    ttk.Label(ob, text='Bodies not qualified for the native USB debugger (e.g. ZV-E10)').grid(
+    ttk.Label(ob, text='Bodies not yet qualified for the native USB debugger').grid(
         row=0, column=0, columnspan=2, sticky='w')
     ttk.Label(ob, foreground='#555', wraplength=700, justify='left', text=(
         'This tab is for cameras that are NOT supported by the native USB debugger yet. '
@@ -796,10 +796,10 @@ def run_gui():
             except Exception as exc:
                 log(f'ERROR: {type(exc).__name__}: {exc}')
                 if 'Body onboarding' not in str(exc):
-                    log('Hint: if this camera is not a qualified body for the native USB '
-                        'debugger (e.g. ZV-E10), see the “Body onboarding” tab - it only '
-                        'reads from the camera and collects the driver telemetry this '
-                        'research needs.')
+                    log('Hint: Ensure the native USB debugger has been deployed to the camera '
+                        '(via tools/deploy_native_usb_debugger.py or setup_usb_debugger.py). '
+                        'If the debugger is not deployed, the camera rejects debugger packets '
+                        'with Sense 0x5 0x20 0x0.')
                 events.put(('warning', ('Camera operation failed', str(exc))))
             finally:
                 session.close()
