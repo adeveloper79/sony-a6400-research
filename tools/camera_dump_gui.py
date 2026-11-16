@@ -94,6 +94,72 @@ def pmca_available():
     return importlib.util.find_spec('pmca') is not None
 
 
+def detect_body_identity(pmca_folder=None):
+    """Identify the connected Sony camera in MSC mode and check debugger qualification.
+
+    Read-only: sends only getCameraInfo / getFirmwareVersion queries. No Senser
+    mode, no writes, no reboot. Returns a dict with identity plus the outcome of
+    the qualification registry lookup (qualified / not qualified).
+    """
+    if pmca_folder:
+        root, err = use_pmca(pmca_folder)
+        if err:
+            raise RuntimeError(err)
+    from tools.setup_usb_debugger import detect_msc_camera
+    from src.a6400.targets.usb_debugger_compat import find_debugger_target_by_model
+    identity = detect_msc_camera()
+    spec = find_debugger_target_by_model(identity['model_name'],
+                                         identity['firmware_version'])
+    identity['qualified'] = spec is not None
+    identity['qualification_note'] = (
+        f'qualified for the native USB debugger (target: {spec.target_id}, '
+        f'qualification: {spec.qualification})' if spec else
+        'NOT qualified for the native USB debugger - the a6400 payload and its '
+        'verified usb_extcmd.ko / libusbcmd.so do not match this body')
+    return identity
+
+
+def collect_onboarding_bundle(identity, pmca_folder, log=print):
+    """Read-only onboarding collection for a body that cannot use the debugger.
+
+    Enters Senser once, reads (never writes) the driver pair, /etc/ld.so.preload,
+    the libc and the ONBOARDING_PROC_FILES text files, then writes a single .zip
+    into <repo>/artifacts/onboarding/ for the debugger developer. Nothing is
+    modified on the camera. Returns the zip path.
+    """
+    if pmca_folder:
+        root, err = use_pmca(pmca_folder)
+        if err:
+            raise RuntimeError(err)
+    import tools.setup_usb_debugger as sdu
+    from pmca.commands.usb import senserShellCommand
+    from tools.deploy_native_usb_debugger import read_preload_safe
+
+    outcome = {}
+
+    def on_senser(cam):
+        previous_preload, preload_existed = read_preload_safe(cam)
+        actual_ko = cam.readFile('/usr/kmod/usb_extcmd.ko')
+        actual_lib = cam.readFile('/usr/lib/libusbcmd.so')
+        log(f'  usb_extcmd.ko: {len(actual_ko)} bytes read')
+        log(f'  libusbcmd.so:  {len(actual_lib)} bytes read')
+        log(f'  ld.so.preload: {"present" if preload_existed else "absent"}'
+            f' ({len(previous_preload)} bytes)')
+        zip_path = sdu.build_onboarding_bundle(
+            cam, identity, actual_ko, actual_lib,
+            previous_preload, preload_existed,
+            compat_result=None, root=ROOT)
+        outcome['zip_path'] = zip_path
+
+    log('Entering Senser to read driver/ABI telemetry...')
+    senserShellCommand(driverName='libusb', complete=on_senser)
+    zip_path = outcome.get('zip_path')
+    if zip_path is None:
+        raise RuntimeError('Senser read session did not produce a bundle '
+                           '(camera may have been too slow; retry with the camera awake)')
+    return zip_path
+
+
 def autodetect_pmca():
     saved = load_settings().get('pmca_folder')
     for folder in (saved, ROOT / 'Sony-PMCA-RE', ROOT.parent / 'Sony-PMCA-RE', ROOT / 'tools' / 'Sony-PMCA-RE'):
@@ -557,6 +623,106 @@ def run_gui():
             nb.select(single)
     tree.bind('<Double-1>', on_double)
 
+    # --- body onboarding tab (unqualified bodies, e.g. ZV-E10)
+    ob = ttk.Frame(nb, padding=10)
+    nb.add(ob, text='Body onboarding')
+    ttk.Label(ob, text='Bodies not qualified for the native USB debugger (e.g. ZV-E10)').grid(
+        row=0, column=0, columnspan=2, sticky='w')
+    ttk.Label(ob, foreground='#555', wraplength=700, justify='left', text=(
+        'This tab is for cameras that are NOT supported by the native USB debugger yet. '
+        'It never writes to the camera. “Detect camera” identifies the body using the '
+        'normal Mass Storage connection and checks the qualification registry. '
+        '“Collect onboarding bundle” enters Senser once, reads the driver/ABI telemetry '
+        'the debugger developer needs (usb_extcmd.ko, libusbcmd.so, /etc/ld.so.preload, '
+        'libc, /proc) and saves it as a .zip for them to review. Nothing on the camera '
+        'is modified; the camera returns to Mass Storage when the session ends.')).grid(
+        row=1, column=0, columnspan=2, sticky='w', pady=(4, 8))
+    body_model_var = tk.StringVar(value='Not detected')
+    body_fw_var = tk.StringVar(value='')
+    body_qual_var = tk.StringVar(value='')
+    body_out_var = tk.StringVar(value='')
+    ob_state = {'busy': False}
+    ob_buttons = []
+
+    def ob_set_busy(busy):
+        ob_state['busy'] = busy
+        for b in ob_buttons:
+            b.configure(state='disabled' if busy else 'normal')
+
+    def ob_run(worker):
+        if ob_state['busy']:
+            return
+        ob_set_busy(True)
+
+        def wrapped():
+            try:
+                worker()
+            except Exception as exc:
+                events.put(('log', f'Onboarding: {type(exc).__name__}: {exc}'))
+                events.put(('warning', ('Onboarding failed', str(exc))))
+            finally:
+                ob_set_busy(False)
+        threading.Thread(target=wrapped, daemon=True).start()
+
+    def do_detect():
+        def worker():
+            events.put(('log', 'Detecting camera (read-only)...'))
+            identity = detect_body_identity(pmca_var.get() or None)
+            events.put(('body_identity', identity))
+            events.put(('log', 'Detected: %s (code %s, FW %s) -> %s'
+                        % (identity['model_name'], identity['model_code'],
+                           identity['firmware_version'], identity['qualification_note'])))
+        ob_run(worker)
+
+    def do_collect():
+        if not body_model_var.get() or body_model_var.get() == 'Not detected':
+            messagebox.showinfo('Body onboarding',
+                                'Press “Detect camera (read-only)” first.', parent=ob)
+            return
+        if body_qual_var.get() and 'qualified for' in body_qual_var.get():
+            messagebox.showinfo(
+                'Body onboarding',
+                'This body IS qualified for the native USB debugger. Use the '
+                '“Single pull” and “Full dump” tabs instead of onboarding.',
+                parent=ob)
+            return
+        confirm = messagebox.askyesno(
+            'Collect onboarding bundle',
+            'This enters Senser mode, reads the driver pair, /etc/ld.so.preload, '
+            'libc and /proc text files, and writes a .zip into artifacts/onboarding/.\n\n'
+            'NOTHING is written to the camera. Continue?',
+            parent=ob)
+        if not confirm:
+            return
+
+        def worker():
+            events.put(('log', 'Collecting read-only onboarding bundle...'))
+            identity = detect_body_identity(pmca_var.get() or None)
+            zip_path = collect_onboarding_bundle(identity, pmca_var.get() or None,
+                                                 lambda msg: events.put(('log', msg)))
+            events.put(('body_zip', zip_path))
+            events.put(('log', 'Onboarding bundle written: %s' % zip_path))
+            events.put(('log', 'Send that .zip to the debugger developer for review. '
+                               'Nothing on the camera was modified.'))
+        ob_run(worker)
+
+    detect_btn = ttk.Button(ob, text='Detect camera (read-only)', command=do_detect)
+    detect_btn.grid(row=2, column=0, sticky='w', pady=2)
+    collect_btn = ttk.Button(ob, text='Collect read-only onboarding bundle', command=do_collect)
+    collect_btn.grid(row=3, column=0, sticky='w', pady=2)
+    ob_buttons.append(detect_btn)
+    ob_buttons.append(collect_btn)
+    ttk.Label(ob, text='Model / code:').grid(row=4, column=0, sticky='w', pady=(10, 0))
+    ttk.Label(ob, textvariable=body_model_var, wraplength=700).grid(
+        row=5, column=0, sticky='w')
+    ttk.Label(ob, text='Firmware:').grid(row=6, column=0, sticky='w')
+    ttk.Label(ob, textvariable=body_fw_var).grid(row=7, column=0, sticky='w')
+    ttk.Label(ob, text='Debugger qualification:').grid(row=8, column=0, sticky='w')
+    ttk.Label(ob, textvariable=body_qual_var, wraplength=700,
+              foreground='#555', justify='left').grid(row=9, column=0, sticky='w')
+    ttk.Label(ob, text='Bundle:').grid(row=10, column=0, sticky='w', pady=(10, 0))
+    ttk.Label(ob, textvariable=body_out_var, wraplength=700).grid(row=11, column=0, sticky='w')
+
     # --- progress + log
     bottom = ttk.Frame(root, padding=8)
     bottom.pack(fill='both')
@@ -629,6 +795,11 @@ def run_gui():
                 log('Cancelled. Partial files are kept as .part and resume on the next run.')
             except Exception as exc:
                 log(f'ERROR: {type(exc).__name__}: {exc}')
+                if 'Body onboarding' not in str(exc):
+                    log('Hint: if this camera is not a qualified body for the native USB '
+                        'debugger (e.g. ZV-E10), see the “Body onboarding” tab - it only '
+                        'reads from the camera and collects the driver telemetry this '
+                        'research needs.')
                 events.put(('warning', ('Camera operation failed', str(exc))))
             finally:
                 session.close()
@@ -829,6 +1000,14 @@ def run_gui():
                     else:
                         prog.configure(mode='indeterminate')
                         prog_var.set(f'{label}  {human(done)}  {human(rate)}/s')
+                elif kind == 'body_identity':
+                    identity = val
+                    body_model_var.set('%s (product code %s)' % (identity['model_name'],
+                                                                  identity['model_code']))
+                    body_fw_var.set(identity['firmware_version'])
+                    body_qual_var.set(identity['qualification_note'])
+                elif kind == 'body_zip':
+                    body_out_var.set(str(val))
                 elif kind == 'done':
                     set_busy(False)
                     prog.configure(mode='determinate')
