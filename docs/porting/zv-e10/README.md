@@ -1,39 +1,71 @@
 # ZV-E10 porting work (Sony ZV-E10 / CXD90045, BIONZ X)
 
-**Status:** static analysis complete; **no camera has been touched; no firmware modified.**
+**Status:** static analysis and Ghidra RE complete; updater kernel booted offline
+(BusyBox shell); **native USB debugger NOT compatible — body onboarding collected.**
 
-This branch collects the offline analysis of the Sony **ZV-E10** (firmware 2.03, the
-current public updater for the body) and everything needed to plan — but not to run —
-a port of the a6400's RAM-only touch mod (`MenuTouchFull`) to that body.
+> **No camera was ever modified.** Every dump was read-only (on-device service-shell
+> pulls + offline analysis). The artifacts stay in the workstation `<workspace>`;
+> this branch carries only the derived analysis.
 
-> The ZV-E10 is the **same BIONZ-X generation** as the a6400 (CXD90045), so the
-> framework is shared and most analysis methods carry over. The **DSC-HX50V** is a
-> different BIONZ generation (ARMv6) and lives in the separate `experimental-hx50v`
-> branch.
+Sony **ZV-E10** (BIONZ X / CXD90045, ARM Thumb-2, Sony CE Linux 8.x). This branch
+contains the offline analysis of the body and the artifacts for planning — not yet
+running — a port of the a6400's RAM-only touch mod (`MenuTouchFull`) to it.
 
-## Contents
+> The **DSC-HX50V** is a different BIONZ generation (ARMv6, CXD4132-class) and lives
+> in the separate `experimental-hx50v` branch. Do not mix the two.
+
+## Quick status
+
+| Item | State |
+|---|---|
+| Official 2.03 firmware package unpacked | ✅ `FirmwareData_ZVE10V203.dat` (crypter CXD90045, model 0x1030010, region 0) |
+| Main kernel (Sony CE Linux 8.2.7.6, `3.0.27_nl-rt106+`, GCC 4.5.1) | ✅ 24,519 symbols decoded |
+| On-device read-only dump (service shell) | ✅ `/dev/nflasha` (1.95 GB, 30 partitions), `/dev/nflashaB0` (4 MB **EXBL** "Astra LPDDR3 Initialize Ver.40.00.01", `V85.00.03`), `/dev/nflashaB1` (zeros) |
+| Updater kernel boots in Unicorn CXD90045 machine | ✅ reaches BusyBox `/bin/ash`; `uname -a` prints correctly (offline, `zv_e10_boot.py`) |
+| Touch-mod RE (viewUnified2.so, libObj.so, CautionConfig.so) | ✅ complete — 148-case TBH Action dispatcher (idx75, case 1 = enter, cases 2–5 = move dirs 1/0/3/2); `Action1 0x304114`; `openLevel2Popup` `0x86292c`; `ViewSettingMenu` vtable `0xbaabb0`; `EventManager::push 0x008a1794`; `g_pEvtMgr` .bss `0x014920e0`; `CmnViewSettingNode` vtable `0x00fab960` (CautionConfig.so) |
+| Native USB debugger qualification | ❌ **not compatible** — `usb_extcmd.ko` (14,796 B, norm `1083cadd…`) and `libusbcmd.so` (15,996 B) differ from the ILCE-6400/7C pair (norm `9d7c97bd…`) |
+| Onboarding bundle for the debugger author | ✅ `ZV-E10-FW2.02-20261116-134044.zip` (drivers + libc + identity; `/proc/*` reads return 0 bytes — Senser file channel cannot read procfs) |
+| `CmnViewSettingNode` vtable (CautionConfig.so) | ✅ `0xfab960` (addr pt `0xfab968`); idx48 = `setItemSelectedBySRNum` |
+
+## What is in this branch
 
 | File | What it is |
 |---|---|
-| `docs/porting/zv-e10/zv-e10-firmware-dump.md` | Firmware dump analysis: official updater package unpack, on-device flash dump, kernel identity, live-probe transcript, artifacts list |
-| `docs/porting/zv-e10/zv-e10-touch-mod-blueprint.md` | Cross-reference: every a6400 absolute address → ZV-E10 equivalent, with confidence levels; effort estimate; what the live phase would require |
+| `docs/porting/zv-e10/zv-e10-firmware-dump.md` | Firmware unpack + on-device dump analysis: updater/main kernels, rootfs inventory, read-only live-probe transcript, RAW verdict (not enabling RAW), artifacts list |
+| `docs/porting/zv-e10/zv-e10-touch-mod-blueprint.md` | Every a6400 absolute address → verified ZV-E10 equivalent, with confidence, effort estimate, loader-injection problem, and what live work would require |
 | `docs/porting/zv-e10/zv-e10-viewUnified2-RE-report.md` | Full RE of `viewUnified2.so` (14 MB): `ViewSettingMenu` vtable, 148-case TBH Action dispatcher, `Action1`, move handlers, `PAS_MenuListTab` vtable |
-| `docs/porting/zv-e10/zv-e10-libObj-RE-report.md` | Full RE of `libObj.so` (21 MB): `ViewBase::Action/Main`, DefRootView::ActionCheckerListBase, `EventManager::push`, `Event` ctor, `g_pEvtMgr`, `WidgetSystem::sys_getInstance` |
-| `scripts/porting/zv_e10_boot.py` | Boots the extracted ZV-E10 updater kernel in the Unicorn CXD90045 machine (E0510-style); offline |
-| `scripts/porting/extract_ext4.py` | Extract ext2/3/4 Sony partition images with 1024-byte boot record via fwtool |
-| `scripts/porting/read_fat.py` | List Sony FAT12/16 partition contents via fwtool |
+| `docs/porting/zv-e10/zv-e10-libObj-RE-report.md` | Full RE of `libObj.so` (21 MB): `ViewBase::Action/Main`, DefRootView::ActionCheckerListBase, `EventManager::push`, `Event` ctor, `g_pEvtMgr`, `sys_getInstance` |
+| `scripts/porting/zv_e10_boot.py` | Boots the extracted updater kernel in the Unicorn CXD90045 machine (E0510-style); offline |
+| `scripts/porting/extract_ext4.py` | Extract ext2/3/4 Sony partition images with 1024-byte boot record |
+| `scripts/porting/read_fat.py` | List Sony FAT12/16 partition contents |
+| `tools/camera_dump_gui.py` | **Fork patch** — new *Body onboarding* tab: `Detect camera` (MSC, read-only) checks the debugger qualification registry; `Collect read-only onboarding bundle` does the author's Senser read-only pass and writes `artifacts/onboarding/<model>-FW<ver>-<ts>.zip`. Native-debugger-qualified bodies (ILCE-6400/7C 2.00) are unchanged |
+
+## The debugger incompatibility (why this matters)
+
+The prebuilt a6400/ILCE-7C native USB debugger payloads are gated on exact
+`usb_extcmd.ko` / `libusbcmd.so` matches (byte-identical `libusbcmd.so`,
+metadata-equivalent `usb_extcmd.ko`). The ZV-E10's pair matches neither:
+
+- `usb_extcmd.ko`: 14,796 B (ILCE-6400/7C: 14,808 B); normalized `1083cadd…` ≠ `9d7c97bd…`
+- `libusbcmd.so`: 15,996 B (ILCE-6400/7C: 15,948 B); sha256 `23b94deb…` ≠ `9fbf3339…`
+
+So the prebuilt payload cannot be deployed safely — its own integrity check would
+reject it. Onboarding bundle above gives the author everything needed to decide if
+a ZV-E10-specific build is feasible. Until then **this body cannot use the native
+USB debugger** — which is exactly what the touch-mod install/deploy path requires.
 
 ## How this work was done (safety)
 
-- The firmware was obtained two ways: (1) the official Sony public firmware updater
-  (analyzed offline, never executed); (2) a **read-only** on-device dump via the
-  service shell (`pull /dev/nflasha`, `pull /dev/nflashaB0/B1`), no writes to flash,
-  no settings changes.
-- All analysis ran on the extracted files on a workstation. **Nothing was written to
+- Official updater package: analyzed offline, never executed — LayoutM-style strings
+  like `Uncompressing Linux` were never run on a live body.
+- On-device dumps: service-shell read-only pulls (`pull /dev/nflasha`,
+  `pull /dev/nflashaB0/B1`); no flash writes, no settings changes, camera verified
+  healthy afterwards.
+- All RE work ran on the extracted files on a workstation. **Nothing was written to
   any camera.**
-- Any future live work requires a separately reviewed, explicitly authorized
-  per-body procedure (see the a6400 evidence for why the ILCE-6400 debugger does not
-  transfer).
+- Live work, if ever approved: body-specific reviewed procedure, one step at a time,
+  explicit go-ahead per step (see the ILCE-6400 evidence for why the general debugger
+  does not transfer).
 
 ## What is deliberately NOT in this branch
 
@@ -47,4 +79,7 @@ a port of the a6400's RAM-only touch mod (`MenuTouchFull`) to that body.
 - `libObj.so`'s 16,254-byte RX zero run is in `.rodata`, not `.text` — the loader
   injection home needs a new approach before the mod can be installed
 - The ZV-E10's vlog-focused menu layout may not accommodate a 7th "Mods" tab design
+  (the a6400's design fits its menu; the ZV-E10 needs a UX rethink)
 - Load bases (runtime) are not knowable offline; every offset here is `base + file`
+- The onboarding bundle's `/proc/*` files are 0 bytes (Senser file channel cannot
+  read procfs) — the driver binaries are what make it useful
