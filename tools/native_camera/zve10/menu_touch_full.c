@@ -395,6 +395,8 @@ static void handle_menu_touch(volatile struct mt_full_state *s, uint32_t mouse) 
     struct mt_point pt = {(float)x, (float)y};
     int is_swipe = has_press && iabs(dx) >= 48 && iabs(dx) > 2 * iabs(dy);
 
+    uint32_t sm_view = find_setting_menu_view(s, menu);
+
     if (!is_swipe) {
         for (unsigned i = 0; i < tabs; i++) {
             if (is_hit(menu + 0x0b9cu + i * 0x220u, &pt)) {
@@ -409,11 +411,6 @@ static void handle_menu_touch(volatile struct mt_full_state *s, uint32_t mouse) 
                 return;
             }
         }
-    }
-
-    if (rd8(menu, 0x1d8u)) {
-        s->last_err = 114u; /* tab-bar focus active */
-        return;
     }
 
     uint32_t tab_node = 0;
@@ -434,12 +431,14 @@ static void handle_menu_touch(volatile struct mt_full_state *s, uint32_t mouse) 
     }
 
     unsigned rows = rd32(page_node, 8u), row_sel = 0;
-    if (rows < 1u || rows > MT_MAX_ROWS ||
-        selected_index(page_node, &row_sel) != 1 || row_sel < 1u || row_sel > rows) {
-        s->last_err = 117u; /* row selection invalid */
+    if (rows > MT_MAX_ROWS) {
+        s->last_err = 117u; /* rows count invalid */
         return;
     }
-    if (rd32(menu, 0x1f8u) != row_sel - 1u) {
+    if (selected_index(page_node, &row_sel) != 1 || row_sel < 1u || row_sel > rows) {
+        row_sel = 0u; /* no row currently highlighted/selected */
+    }
+    if (row_sel > 0u && rd32(menu, 0x1f8u) != row_sel - 1u) {
         *(volatile uint32_t *)(menu + 0x1f8u) = row_sel - 1u;
     }
 
@@ -482,6 +481,11 @@ static void handle_menu_touch(volatile struct mt_full_state *s, uint32_t mouse) 
                 if (set_selected_index(page_node, r + 1u) == 1) {
                     *(volatile uint32_t *)(menu + 0x1f8u) = r;
                     *(volatile uint32_t *)(menu + 0x1fcu) = r;
+                    *(volatile uint8_t *)(menu + 0x1d8u) = 0;
+                    if (sm_view) {
+                        *(volatile uint32_t *)(sm_view + 0x164u) = 2u;
+                        *(volatile uint32_t *)(sm_view + 0x174u) = r;
+                    }
                     sync_refresh(s, menu);
                 } else {
                     s->last_err = 3u;
@@ -501,11 +505,14 @@ static void handle_menu_touch(volatile struct mt_full_state *s, uint32_t mouse) 
                 *(volatile uint32_t *)(menu + 0x1f8u) = r;
                 *(volatile uint32_t *)(menu + 0x1fcu) = r;
                 *(volatile uint8_t *)(menu + 0x1d8u) = 0;
+                if (sm_view) {
+                    *(volatile uint32_t *)(sm_view + 0x164u) = 2u;
+                    *(volatile uint32_t *)(sm_view + 0x174u) = r;
+                }
 
                 if (is_popup) {
                     enter_selected(menu, leaf);
                 } else {
-                    uint32_t sm_view = find_setting_menu_view(s, menu);
                     if (sm_view) {
                         s->last_err = 110u; /* Action 11 dispatched */
                         void (*action)(uint32_t, int) = (void *)(s->view_base + MT_OFFSET_ACTION_DISPATCH);
