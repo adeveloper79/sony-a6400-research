@@ -28,6 +28,18 @@ counts request time in one bounded transaction budget. This is **not** debugger
 or partition access. Do not interpret the successful model query as permission
 for service mode, uploads, startup changes or driver replacement.
 
+For **ZV-E10 (FW 2.00–2.03)**,
+[E0524](evidence/0524-zve10-native-usb-debugger-qualification.md)
+qualifies offline compatibility based on live hardware onboarding pulls and official
+firmware packages. `libusbcmd.so` (15,996 B) is SHA-identical to ILCE-6400A 1.01 (`23b94deb...`)
+and byte-identical to the a6400 baseline except for `.comment` metadata (+46 B) and header
+padding (+2 B); `usb_extcmd.ko` (14,796 B, normalized `1083cadde...`) reflects the Sony CE Linux
+8.2.7.6 toolchain list helper rework (-12 B in `.text`). The camera target `zv_e10` is
+registered in `src/a6400/targets/usb_debugger_compat.py` as qualification `reference` with pinned
+digests. Automated tooling (`tools/setup_usb_debugger.py` and `tools/deploy_native_usb_debugger.py`)
+supports ZV-E10 with strict integrity checking. Sources and build scripts are located in
+`tools/native_camera/zve10/`.
+
 ## Protocol v2 (E0401): warm log readout, recover, and the PC Remote boundary
 
 The installed daemon now speaks protocol v2 (same 4096-byte frame, feature

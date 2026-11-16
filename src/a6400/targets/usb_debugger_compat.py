@@ -29,6 +29,21 @@ VERIFIED_LIBUSBCMD_SHA256 = (
     "9fbf3339792e40caa73faa63d6b2dfa962ca4c47853320b49ff589595283ba71"
 )
 
+# ZV-E10 (FW 2.00 - 2.03) driver pair:
+# Built with Sony CE Linux 8.2.7.6 / GCC 4.5.1 (build 20220614).
+# libusbcmd.so is byte-identical to ILCE-6400A 1.01 (SHA 23b94deb...; differing from
+# a6400 only by a 46-byte .comment record + 2-byte e_shoff pad -> +48 B).
+# usb_extcmd.ko is 14,796 B (-12 B vs a6400, matching a6400A 1.01 toolchain generation
+# list_finalize/list_delete_node rework).
+ZVE10_USB_EXTCMD_SIZE = 14796
+ZVE10_USB_EXTCMD_NORMALIZED_SHA256 = (
+    "1083cadde9dda2534585c1571fc1b320781fdeccb43cfc648e1d342dba55620f"
+)
+ZVE10_LIBUSBCMD_SIZE = 15996
+ZVE10_LIBUSBCMD_SHA256 = (
+    "23b94deb094d31f160cfe1d46330f2425e94d4801dfccb66720c4cf4b81cfb7e"
+)
+
 DEFAULT_PAYLOAD_DAEMON = "devcrashday_a6400/a6400_usb_debugd.elf"
 DEFAULT_PAYLOAD_LAUNCHER = "devcrashday_a6400/hook/usb_debug_launcher.so"
 
@@ -110,6 +125,29 @@ USB_DEBUGGER_TARGETS: Mapping[str, DebuggerTargetSpec] = {
             "usb_extcmd.ko is metadata-only equivalent; info/ps/exec verified in normal MSC."
         ),
     ),
+    "zv_e10": DebuggerTargetSpec(
+        target_id="zv_e10",
+        model_name="ZV-E10",
+        firmware_versions=("2.00", "2.01", "2.02", "2.03"),
+        qualification="reference",
+        usb_extcmd_size=ZVE10_USB_EXTCMD_SIZE,
+        usb_extcmd_normalized_sha256=ZVE10_USB_EXTCMD_NORMALIZED_SHA256,
+        usb_extcmd_exact_sha256s=(
+            "050ff3913e172f1b98365d88f27c37f0dcd40ed7a6ec014ee8ccc82fba01ad2b",
+        ),
+        usb_extcmd_reference_paths=(
+            "artifacts/hardware/zv_e10-2.02-pull/usb_extcmd.ko",
+        ),
+        libusbcmd_size=ZVE10_LIBUSBCMD_SIZE,
+        libusbcmd_sha256=ZVE10_LIBUSBCMD_SHA256,
+        payload_daemon=DEFAULT_PAYLOAD_DAEMON,
+        payload_launcher=DEFAULT_PAYLOAD_LAUNCHER,
+        notes=(
+            "Target for Sony ZV-E10 (FW 2.00-2.03, CE Linux 8.2.7.6): libusbcmd.so is "
+            "SHA-identical to ILCE-6400A 1.01; usb_extcmd.ko is 14,796 B (same toolchain family). "
+            "Qualified offline via hardware onboarding pull and firmware 2.03 package analysis."
+        ),
+    ),
 }
 
 
@@ -121,6 +159,8 @@ def list_debugger_targets() -> tuple[str, ...]:
 def get_debugger_target(target_id: str) -> DebuggerTargetSpec:
     """Look up a registered debugger target spec by ID."""
     key = target_id.strip().lower().replace("-", "_")
+    if key == "zve10":
+        key = "zv_e10"
     if key not in USB_DEBUGGER_TARGETS:
         known = ", ".join(list_debugger_targets())
         raise KeyError(
@@ -137,10 +177,14 @@ def find_debugger_target_by_model(
     normalized_model = model_name.strip().upper()
     if not normalized_model:
         return None
+    compact_model = normalized_model.replace("-", "").replace("_", "")
     fw = firmware_version.strip() if firmware_version else None
     candidates = [
         spec for spec in USB_DEBUGGER_TARGETS.values()
         if spec.model_name.upper() == normalized_model
+        or spec.model_name.upper().replace("-", "").replace("_", "") == compact_model
+        or spec.target_id.upper() == normalized_model
+        or spec.target_id.upper().replace("-", "").replace("_", "") == compact_model
     ]
     if not candidates:
         return None

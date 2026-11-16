@@ -39,6 +39,9 @@ class TestSetupUsbDebugger(unittest.TestCase):
     def test_find_debugger_target_by_model(self):
         self.assertEqual(find_debugger_target_by_model("ilce-7c", "2.00").target_id, "ilce_7c")
         self.assertEqual(find_debugger_target_by_model("ILCE-6400", "2.00").target_id, "ilce_6400")
+        self.assertEqual(find_debugger_target_by_model("ZV-E10", "2.02").target_id, "zv_e10")
+        self.assertEqual(find_debugger_target_by_model("zv-e10", "2.00").target_id, "zv_e10")
+        self.assertEqual(find_debugger_target_by_model("ZVE10").target_id, "zv_e10")
         self.assertIsNone(find_debugger_target_by_model("ILCE-9M2", "2.00"))
 
     def test_ensure_payload_binaries_downloads_and_verifies_sha256(self):
@@ -109,6 +112,23 @@ class TestSetupUsbDebugger(unittest.TestCase):
             unpacked = inspect_and_unpack_bundle(zip_path, root=tmp_root)
             self.assertTrue(unpacked["baseline_compatible"])
             self.assertIn('target_id="ilce_9999"', unpacked["spec_snippet"])
+
+    @unittest.skipUnless(
+        (ROOT / "artifacts/onboarding/ZV-E10-FW2.02-20261116-134044.zip").is_file(),
+        "ZV-E10 onboarding bundle fixture not present",
+    )
+    def test_zve10_onboarding_bundle_and_developer_unpack(self):
+        bundle_path = ROOT / "artifacts/onboarding/ZV-E10-FW2.02-20261116-134044.zip"
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_root = Path(tmp)
+            unpacked = inspect_and_unpack_bundle(bundle_path, root=tmp_root)
+            self.assertEqual(unpacked["target_id"], "zv_e10")
+            self.assertEqual(unpacked["model_name"], "ZV-E10")
+            self.assertEqual(unpacked["firmware_version"], "2.02")
+            self.assertTrue(unpacked["baseline_compatible"])
+            self.assertTrue(unpacked["usb_extcmd_match"])
+            self.assertTrue(unpacked["libusbcmd_match"])
+            self.assertIn('target_id="zv_e10"', unpacked["spec_snippet"])
 
 
 if __name__ == "__main__":

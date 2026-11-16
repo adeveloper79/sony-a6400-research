@@ -18,6 +18,7 @@ from src.a6400.targets.usb_debugger_compat import (  # noqa: E402
     VERIFIED_LIBUSBCMD_SIZE,
     VERIFIED_USB_EXTCMD_NORMALIZED_SHA256,
     VERIFIED_USB_EXTCMD_SIZE,
+    find_debugger_target_by_model,
 )
 from tools.research.elf_metadata_identity import normalize_elf_metadata  # noqa: E402
 
@@ -49,12 +50,18 @@ def inspect_and_unpack_bundle(bundle_path: Path, root: Path = ROOT) -> dict:
     ko_sha = hashlib.sha256(actual_ko).hexdigest()
     lib_sha = hashlib.sha256(actual_lib).hexdigest()
 
+    registered_spec = find_debugger_target_by_model(model_name, fw_ver)
+    expected_ko_size = registered_spec.usb_extcmd_size if registered_spec else VERIFIED_USB_EXTCMD_SIZE
+    expected_ko_norm = registered_spec.usb_extcmd_normalized_sha256 if registered_spec else VERIFIED_USB_EXTCMD_NORMALIZED_SHA256
+    expected_lib_size = registered_spec.libusbcmd_size if registered_spec else VERIFIED_LIBUSBCMD_SIZE
+    expected_lib_sha = registered_spec.libusbcmd_sha256 if registered_spec else VERIFIED_LIBUSBCMD_SHA256
+
     ko_ok = (
-        len(actual_ko) == VERIFIED_USB_EXTCMD_SIZE
+        len(actual_ko) == expected_ko_size
         and bool(ko_norm.get('valid'))
-        and ko_norm.get('normalized_sha256') == VERIFIED_USB_EXTCMD_NORMALIZED_SHA256
+        and ko_norm.get('normalized_sha256') == expected_ko_norm
     )
-    lib_ok = len(actual_lib) == VERIFIED_LIBUSBCMD_SIZE and lib_sha == VERIFIED_LIBUSBCMD_SHA256
+    lib_ok = len(actual_lib) == expected_lib_size and lib_sha == expected_lib_sha
 
     snippet = None
     if ko_ok and lib_ok:
@@ -63,17 +70,17 @@ def inspect_and_unpack_bundle(bundle_path: Path, root: Path = ROOT) -> dict:
             f'        target_id="{target_id}",\n'
             f'        model_name="{model_name}",\n'
             f'        firmware_versions=("{fw_ver}",),\n'
-            f'        qualification="qualified_offline",\n'
-            f'        usb_extcmd_size=VERIFIED_USB_EXTCMD_SIZE,\n'
-            f'        usb_extcmd_normalized_sha256=VERIFIED_USB_EXTCMD_NORMALIZED_SHA256,\n'
+            f'        qualification="{registered_spec.qualification if registered_spec else "qualified_offline"}",\n'
+            f'        usb_extcmd_size={expected_ko_size},\n'
+            f'        usb_extcmd_normalized_sha256="{expected_ko_norm}",\n'
             f'        usb_extcmd_exact_sha256s=(\n'
             f'            "{ko_sha}",\n'
             f'        ),\n'
             f'        usb_extcmd_reference_paths=(\n'
             f'            "artifacts/hardware/{target_id}-{fw_ver}-pull/usb_extcmd.ko",\n'
             f'        ),\n'
-            f'        libusbcmd_size=VERIFIED_LIBUSBCMD_SIZE,\n'
-            f'        libusbcmd_sha256=VERIFIED_LIBUSBCMD_SHA256,\n'
+            f'        libusbcmd_size={expected_lib_size},\n'
+            f'        libusbcmd_sha256="{expected_lib_sha}",\n'
             f'    ),'
         )
 

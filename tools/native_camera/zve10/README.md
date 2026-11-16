@@ -167,3 +167,21 @@ RX zero injection homes libObj.so 0x011964ee (16,254 B, largest; ~45 KB in 15+ r
                         CautionConfig.so 0 B
 /tmp_bt existence       UNVERIFIED on ZV-E10
 ```
+
+## Native USB Debugger for ZV-E10
+
+While `MenuTouchFull` is an in-memory UI mod requiring dynamic function hooks, the **Native USB Debugger** operates at the USB driver level over the existing Mass Storage external command interface (`/dev/usb/usb_extcmd`, feature `0x23`, opcode `0x7a`).
+
+### Driver Pair Analysis & Qualification
+- **`libusbcmd.so`** (15,996 B, SHA `23b94deb...`): SHA-identical to ILCE-6400A 1.01. Code and export surface (`PackParamDriver` @ `0x2783`) are identical to the a6400 baseline; the only delta is the 46-byte `.comment` record plus 2 bytes of `e_shoff` padding (+48 B total).
+- **`usb_extcmd.ko`** (14,796 B, SHA `050ff391...`, normalized SHA `1083cadde...`): Rebuilt with Sony CE Linux 8.2.7.6 (GCC 4.5.1, build 20220614). The -12 byte difference corresponds to the toolchain generation `list_finalize` (+8 B) / `list_delete_node` (+4 B) rework in `.text`.
+
+### Files
+| File | Description |
+| --- | --- |
+| `zve10_usb_debugd.c` | Protocol v2 daemon source with ZV-E10 module recovery (`usbg_video_zve10`), `/dev/zve10_dbg` node check, and `model=ZV-E10` reporting |
+| `build_zve10_usb_debugger.sh` | Cross-compile script linking against ZV-E10 glibc 2.11.2 (`libc.so.6`) |
+| `build_zve10_usb_debugger.py` | Python build & fail-closed static ELF audit tool (ARM EABI, non-executable PT_LOAD, symbol resolution) |
+| `src/a6400/targets/usb_debugger_compat.py` | Target spec `zv_e10` registered with pinned driver digests and hardware pull fixtures |
+
+Target `zv_e10` is supported by `tools/setup_usb_debugger.py` and `tools/deploy_native_usb_debugger.py`.
