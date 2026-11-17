@@ -124,6 +124,73 @@ class ZVE10MenuTouchFullTests(unittest.TestCase):
                 f"Trampoline slot {hex(slot)} not found in payload",
             )
 
+    def test_fn_column_and_row_mapping(self):
+        """Verify 6-column physical calibration and row splitting for the Fn menu."""
+        def map_coords(x: int, y: int):
+            if y < 260:
+                return "CANCEL"
+            if x < 120:
+                col = 0
+            elif x < 220:
+                col = 1
+            elif x < 320:
+                col = 2
+            elif x < 420:
+                col = 3
+            elif x < 520:
+                col = 4
+            else:
+                col = 5
+            row = 1 if y >= 370 else 0
+            return row * 6 + col
+
+        # Upper dismiss
+        self.assertEqual(map_coords(100, 250), "CANCEL")
+        self.assertEqual(map_coords(500, 100), "CANCEL")
+
+        # Top row: tiles 0..5 (labeled 1..6 by user)
+        self.assertEqual(map_coords(0, 300), 0)    # Extreme left edge / bezel
+        self.assertEqual(map_coords(45, 300), 0)   # User's blue box left bound
+        self.assertEqual(map_coords(119, 300), 0)  # Near tile 1/2 divider
+        self.assertEqual(map_coords(120, 300), 1)  # Tile 2 left bound
+        self.assertEqual(map_coords(219, 300), 1)
+        self.assertEqual(map_coords(220, 300), 2)  # Tile 3
+        self.assertEqual(map_coords(320, 300), 3)  # Tile 4
+        self.assertEqual(map_coords(420, 300), 4)  # Tile 5
+        self.assertEqual(map_coords(519, 300), 4)
+        self.assertEqual(map_coords(520, 300), 5)  # Tile 6 left bound (fixed from 534)
+        self.assertEqual(map_coords(600, 300), 5)  # User's blue box right bound
+        self.assertEqual(map_coords(640, 300), 5)  # Extreme right edge / bezel
+
+        # Bottom row: tiles 6..11 (labeled 7..12 by user)
+        self.assertEqual(map_coords(0, 400), 6)    # Tile 7 extreme left
+        self.assertEqual(map_coords(45, 420), 6)   # Tile 7 inside blue box
+        self.assertEqual(map_coords(150, 420), 7)  # Tile 8
+        self.assertEqual(map_coords(250, 420), 8)  # Tile 9
+        self.assertEqual(map_coords(350, 420), 9)  # Tile 10
+        self.assertEqual(map_coords(450, 420), 10) # Tile 11
+        self.assertEqual(map_coords(520, 450), 11) # Tile 12 left bound
+        self.assertEqual(map_coords(639, 450), 11) # Tile 12 extreme right
+
+    def test_fn_ring_navigation_step_counts(self):
+        """Verify shortest circular path step counts and directions on 12-tile ring."""
+        def get_steps(cur: int, target: int):
+            diff = (target - cur + 12) % 12
+            if diff <= 6:
+                return ("RIGHT", diff)
+            else:
+                return ("LEFT", 12 - diff)
+
+        self.assertEqual(get_steps(0, 1), ("RIGHT", 1))
+        self.assertEqual(get_steps(0, 5), ("RIGHT", 5))
+        self.assertEqual(get_steps(0, 6), ("RIGHT", 6))
+        self.assertEqual(get_steps(0, 7), ("LEFT", 5))
+        self.assertEqual(get_steps(0, 11), ("LEFT", 1))
+        self.assertEqual(get_steps(5, 6), ("RIGHT", 1))
+        self.assertEqual(get_steps(6, 5), ("LEFT", 1))
+        self.assertEqual(get_steps(11, 0), ("RIGHT", 1))
+        self.assertEqual(get_steps(0, 11), ("LEFT", 1))
+
 
 if __name__ == "__main__":
     unittest.main()
