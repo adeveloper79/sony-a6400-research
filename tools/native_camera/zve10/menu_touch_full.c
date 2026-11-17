@@ -606,7 +606,6 @@ static void handle_fn_touch(volatile struct mt_full_state *s, uint32_t mouse) {
         push_key_click(s, MT_EVT_KEY_FN);
         record_event(s, MT_ACT_FN_CANCEL, 0u, x, y, 0u, 0u, 0u);
         s->last_action = MT_ACT_FN_CANCEL;
-        s->last_target = 0u;
         s->last_err = 0u;
         return;
     }
@@ -630,29 +629,33 @@ static void handle_fn_touch(volatile struct mt_full_state *s, uint32_t mouse) {
         return;
     }
 
-    /* 4. Moving to target tile */
-    if (s->last_action == MT_ACT_FN_SELECT) {
-        /* Relative move from known previous tile position */
-        int cur_row = (int)s->last_target / 6;
-        int cur_col = (int)s->last_target % 6;
-        int d_row = row - cur_row;
-        int d_col = col - cur_col;
+    /* 4. Relative navigation to target tile from tracked position */
+    uint32_t cur = s->last_target;
+    if (cur > 11u) cur = 0u;
 
-        if (d_row > 0) push_key_click(s, MT_EVT_KEY_DOWN);
-        else if (d_row < 0) push_key_click(s, MT_EVT_KEY_UP);
+    int cur_row = (int)cur / 6;
+    int cur_col = (int)cur % 6;
+    int d_row = row - cur_row;
+    int d_col = col - cur_col;
 
-        if (d_col > 0) {
-            for (int k = 0; k < d_col; k++) push_key_click(s, MT_EVT_KEY_RIGHT);
-        } else if (d_col < 0) {
-            for (int k = 0; k < -d_col; k++) push_key_click(s, MT_EVT_KEY_LEFT);
-        }
-    } else {
-        /* First tap in Fn menu: reset to (0,0) by slamming UP and LEFT, then move to target */
+    /* Vertical movement */
+    if (d_row > 0) {
+        push_key_click(s, MT_EVT_KEY_DOWN);
+    } else if (d_row < 0) {
         push_key_click(s, MT_EVT_KEY_UP);
-        for (int k = 0; k < 5; k++) push_key_click(s, MT_EVT_KEY_LEFT);
+    }
 
-        if (row > 0) push_key_click(s, MT_EVT_KEY_DOWN);
-        for (int k = 0; k < col; k++) push_key_click(s, MT_EVT_KEY_RIGHT);
+    /* Horizontal movement via shortest circular path on 6-column ring */
+    if (d_col > 3) {
+        d_col -= 6;
+    } else if (d_col < -3) {
+        d_col += 6;
+    }
+
+    if (d_col > 0) {
+        for (int k = 0; k < d_col; k++) push_key_click(s, MT_EVT_KEY_RIGHT);
+    } else if (d_col < 0) {
+        for (int k = 0; k < -d_col; k++) push_key_click(s, MT_EVT_KEY_LEFT);
     }
 
     s->last_target = target_idx;
