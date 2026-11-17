@@ -599,6 +599,13 @@ static void push_key_click(volatile struct mt_full_state *s, uint32_t key) {
     push_async_event(s, key, 2u); /* Key up */
 }
 
+static inline uint32_t get_heap_end(void) {
+    register uint32_t r0 asm("r0") = 0;
+    register uint32_t r7 asm("r7") = 45; /* __NR_brk */
+    asm volatile("svc 0" : "=r"(r0) : "r"(r0), "r"(r7) : "memory");
+    return r0;
+}
+
 static uint32_t find_fn_menu_view(volatile struct mt_full_state *s) {
     uint32_t v4_base = s->view4_base ? s->view4_base : 0x2c100000u;
     uint32_t vtv = v4_base + MT_OFFSET_VTV_VIEW_FN;
@@ -606,73 +613,24 @@ static uint32_t find_fn_menu_view(volatile struct mt_full_state *s) {
 
     /* 1. Fast path: check cached instance */
     uint32_t cached = s->cached_fn_view;
-    if (is_valid_ptr(cached) && rd32(cached, 0u) == vtv && rd32(cached, 0x28u) == sec_vtv) {
+    if (is_valid_ptr(cached) && rd32(cached, 0u) == vtv && rd32(cached, 0x28u) == sec_vtv && rd32(cached, 0x17cu) <= 11u) {
         return cached;
     }
 
-    /* 2. Check ViewManager */
-    uint32_t vm = rd32(s->lib_base + MT_OFFSET_VIEW_MGR_PTR, 0u);
-    if (!is_valid_ptr(vm)) {
-        uint32_t got_vm = rd32(s->lib_base + 0x013dc7b4u, 0u); /* GOT for pViewManager */
-        if (is_valid_ptr(got_vm)) vm = rd32(got_vm, 0u);
+    /* 2. Scan heap downwards from heap top to find active ViewFnMenu */
+    uint32_t heap_top = get_heap_end();
+    if (heap_top < 0x00020000u || heap_top > 0x01000000u) {
+        heap_top = 0x00600000u;
     }
-    if (!is_valid_ptr(vm)) {
-        uint32_t got_old = rd32(s->lib_base + MT_OFFSET_VIEW_MGR_GOT, 0u);
-        if (is_valid_ptr(got_old)) vm = rd32(got_old, 0u);
-    }
-    if (is_valid_ptr(vm)) {
-        int cnt = (int)rd32(vm, 0u);
-        if (cnt > 0 && cnt <= 128) {
-            uint32_t views_arr = rd32(vm, 4u);
-            if (is_valid_ptr(views_arr)) {
-                for (int i = 0; i < cnt; i++) {
-                    uint32_t vwrap = rd32(views_arr, (uint32_t)i * 4u);
-                    if (is_valid_ptr(vwrap)) {
-                        if (rd32(vwrap, 0u) == vtv && rd32(vwrap, 0x28u) == sec_vtv) {
-                            s->cached_fn_view = vwrap;
-                            return vwrap;
-                        }
-                        uint32_t inner = rd32(vwrap, 0x18u);
-                        if (is_valid_ptr(inner) && rd32(inner, 0u) == vtv && rd32(inner, 0x28u) == sec_vtv) {
-                            s->cached_fn_view = inner;
-                            return inner;
-                        }
-                    }
-                }
-            }
-            uint32_t entries = rd32(vm, 0x20u);
-            if (is_valid_ptr(entries)) {
-                for (int i = 0; i < cnt; i++) {
-                    uint32_t ent = entries + (uint32_t)i * 16u;
-                    uint32_t vid = rd32(ent, 8u);
-                    uint32_t vwrap = rd32(ent, 4u);
-                    if (is_valid_ptr(vwrap)) {
-                        if (vid == 0x00011d76u) {
-                            s->cached_fn_view = vwrap;
-                            return vwrap;
-                        }
-                        if (rd32(vwrap, 0u) == vtv && rd32(vwrap, 0x28u) == sec_vtv) {
-                            s->cached_fn_view = vwrap;
-                            return vwrap;
-                        }
-                        uint32_t inner = rd32(vwrap, 0x18u);
-                        if (is_valid_ptr(inner)) {
-                            if (vid == 0x00011d76u || (rd32(inner, 0u) == vtv && rd32(inner, 0x28u) == sec_vtv)) {
-                                s->cached_fn_view = inner;
-                                return inner;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
+    heap_top = (heap_top - 4u) & ~3u;
 
-    /* 3. Heap search: scan primary heap [0x00016000, 0x0045f000] */
-    for (uint32_t p = 0x00016000u; p < 0x0045f000u; p += 4u) {
+    for (uint32_t p = heap_top; p >= 0x00016000u; p -= 4u) {
         if (rd32(p, 0u) == vtv && rd32(p, 0x28u) == sec_vtv) {
-            s->cached_fn_view = p;
-            return p;
+            uint32_t idx = rd32(p, 0x17cu);
+            if (idx <= 11u) {
+                s->cached_fn_view = p;
+                return p;
+            }
         }
     }
 
@@ -693,12 +651,23 @@ static void handle_fn_touch(volatile struct mt_full_state *s, uint32_t mouse) {
     int16_t x = 0, y = 0;
     void (*get_pos)(uint32_t, unsigned, int16_t *, int16_t *) = (void *)(lib + MT_OFFSET_GET_POS);
     get_pos(lib + MT_SYSTEM_ADDR, mouse, &x, &y);
-    s->press_valid = 0u;
 
     if (x == 32767 || y == 32767) {
         s->last_err = 99u;
+        s->press_valid = 0u;
         return;
     }
+
+    /* Stabilize coordinates with press coords if within tap tolerance */
+    if (s->press_valid) {
+        int dx = (int)x - (int)s->press_x;
+        int dy = (int)y - (int)s->press_y;
+        if (dx >= -25 && dx <= 25 && dy >= -25 && dy <= 25) {
+            x = s->press_x;
+            y = s->press_y;
+        }
+    }
+    s->press_valid = 0u;
 
     s->last_x = x;
     s->last_y = y;
@@ -709,6 +678,7 @@ static void handle_fn_touch(volatile struct mt_full_state *s, uint32_t mouse) {
         record_event(s, MT_ACT_FN_CANCEL, 0u, x, y, 0u, 0u, 0u);
         s->last_action = MT_ACT_FN_CANCEL;
         s->last_err = 0u;
+        s->cached_fn_view = 0u;
         return;
     }
 
@@ -753,27 +723,16 @@ static void handle_fn_touch(volatile struct mt_full_state *s, uint32_t mouse) {
             update_visual(view_fn);
         }
 
-        /* Navigate to target tile via ProductAction with flags cleared on every step */
-        int cur_row = (int)cur_idx / 6;
-        int cur_col = (int)cur_idx % 6;
-        int d_row = row - cur_row;
-        int d_col = col - cur_col;
-
-        /* Vertical step */
-        if (d_row > 0) {
-            step_fn_action(view_fn, 3, fn_action); /* Action 3 = DOWN */
-        } else if (d_row < 0) {
-            step_fn_action(view_fn, 2, fn_action); /* Action 2 = UP */
-        }
-
-        /* Horizontal steps */
-        if (d_col > 0) {
-            for (int k = 0; k < d_col; k++) {
-                step_fn_action(view_fn, 1, fn_action); /* Action 1 = RIGHT */
+        /* Ring navigation: shortest circular path on 12-tile continuous ring */
+        int diff = ((int)target_idx - (int)cur_idx + 12) % 12;
+        if (diff <= 6) {
+            for (int k = 0; k < diff; k++) {
+                step_fn_action(view_fn, 1, fn_action); /* Action 1 = RIGHT (+1) */
             }
-        } else if (d_col < 0) {
-            for (int k = 0; k < -d_col; k++) {
-                step_fn_action(view_fn, 0, fn_action); /* Action 0 = LEFT */
+        } else {
+            int steps = 12 - diff;
+            for (int k = 0; k < steps; k++) {
+                step_fn_action(view_fn, 0, fn_action); /* Action 0 = LEFT (-1) */
             }
         }
 
@@ -785,35 +744,7 @@ static void handle_fn_touch(volatile struct mt_full_state *s, uint32_t mouse) {
         return;
     }
 
-    /* Fallback if ViewFnMenu view not found: key event simulation */
-    s->last_err = 301u;
-    if (s->last_action == MT_ACT_FN_SELECT && s->last_target == target_idx) {
-        push_key_click(s, MT_EVT_KEY_ENTER);
-        record_event(s, MT_ACT_FN_ENTER, target_idx, x, y, 0u, 0u, 0u);
-        s->last_action = MT_ACT_FN_ENTER;
-        return;
-    }
-
-    uint32_t cur = s->last_target;
-    if (cur > 11u) cur = 0u;
-    int cur_row = (int)cur / 6;
-    int cur_col = (int)cur % 6;
-    int d_row = row - cur_row;
-    int d_col = col - cur_col;
-
-    if (d_row > 0) push_key_click(s, MT_EVT_KEY_DOWN);
-    else if (d_row < 0) push_key_click(s, MT_EVT_KEY_UP);
-
-    if (d_col > 0) {
-        for (int k = 0; k < d_col; k++) push_key_click(s, MT_EVT_KEY_RIGHT);
-    } else if (d_col < 0) {
-        for (int k = 0; k < -d_col; k++) push_key_click(s, MT_EVT_KEY_LEFT);
-    }
-
-    s->last_target = target_idx;
-    s->last_action = MT_ACT_FN_SELECT;
-    record_event(s, MT_ACT_FN_SELECT, target_idx, x, y, 0u, 0u, 0u);
-    s->last_err = 0u;
+    s->last_err = 301u; /* ViewFnMenu not found */
 }
 
 uint32_t mt_full_press(void *system, void *message) {
@@ -854,6 +785,7 @@ uint32_t mt_full_release(void *system, void *message) {
             if (get_fn_active && get_fn_active()) {
                 handle_fn_touch(s, mouse);
             } else {
+                s->cached_fn_view = 0u;
                 handle_menu_touch(s, mouse);
             }
         } else {
