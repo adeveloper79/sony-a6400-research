@@ -32,6 +32,12 @@ def run_cmd(cam, cmd, timeout=10.0):
 
 def execute_deploy(cam):
     print("[+] Connected to Sony ZV-E10 in Senser mode!")
+    time.sleep(1.5)
+    try:
+        cam.readHasp()
+    except Exception:
+        pass
+
     guard_path = os.path.join(repo_root, "artifacts/hardware/zve10/native_menu_touch_full_guard")
     check_req = os.path.join(repo_root, "artifacts/hardware/zve10/menu-touch-full-check.req")
     install_req = os.path.join(repo_root, "artifacts/hardware/zve10/menu-touch-full-install.req")
@@ -50,10 +56,10 @@ def execute_deploy(cam):
 
     print("[*] Activating terminal...")
     cam.setTerminalEnable(False)
-    time.sleep(0.1)
+    time.sleep(0.2)
     cam.setTerminalEnable(True)
-    time.sleep(0.5)
-    for _ in range(10):
+    time.sleep(1.0)
+    for _ in range(15):
         cam.dev.readTerminal()
         time.sleep(0.05)
 
