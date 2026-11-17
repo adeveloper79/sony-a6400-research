@@ -38,6 +38,9 @@
 /* viewUnified4.so relative offsets */
 #define MT_OFFSET_VTV_VIEW_FN      0x00317bd8u /* ViewFnMenu primary vtable offset */
 #define MT_OFFSET_FN_SET_CURSOR    0x00227bccu /* ViewFnMenu::setCursorFocus (Thumb +1) */
+#define MT_OFFSET_FN_NOTIFY        0x0022a0ceu /* ViewFnMenu::notifyLayout (Thumb +1) */
+#define MT_OFFSET_FN_UPDATE_TILE   0x0022c438u /* ViewFnMenu::updateTileVisual (Thumb +1) */
+#define MT_OFFSET_FN_ACTION        0x0023249eu /* ViewFnMenu::ProductAction (Thumb +1) */
 
 /* Key event codes */
 #define MT_EVT_KEY_ENTER           0x15010052u /* Physical Center button (ENTER) */
@@ -134,6 +137,10 @@ static uint32_t get_tid(void) {
 
 static inline int iabs(int v) {
     return v < 0 ? -v : v;
+}
+
+static inline int is_valid_ptr(uint32_t p) {
+    return p >= 0x00010000u && p < 0xc0000000u && (p & 3u) == 0u;
 }
 
 static void record_event(volatile struct mt_full_state *s, uint32_t action, uint32_t target,
@@ -314,7 +321,7 @@ static void handle_menu_touch(volatile struct mt_full_state *s, uint32_t mouse) 
     } else {
         /* If lookup failed because popup/modal dialog is active, fallback to cached menu */
         uint32_t cached = s->cached_menu;
-        if (cached > 0x10000000u && rd32(cached, 0u) == expected_vtv && rd32(cached, 0x1cu) == cached) {
+        if (is_valid_ptr(cached) && rd32(cached, 0u) == expected_vtv && rd32(cached, 0x1cu) == cached) {
             menu = cached;
             err = 0;
         } else {
@@ -543,6 +550,37 @@ static void handle_menu_touch(volatile struct mt_full_state *s, uint32_t mouse) 
     s->last_err = 199u; /* no widget hit at coordinates */
 }
 
+static uint32_t find_fn_menu_view(volatile struct mt_full_state *s) {
+    uint32_t lib = s->lib_base;
+    uint32_t vm = rd32(lib + MT_OFFSET_P_VIEW_MGR, 0u);
+    if (!is_valid_ptr(vm)) {
+        return 0u;
+    }
+    int cnt = (int)rd32(vm, 0u);
+    uint32_t entries = rd32(vm, 0x20u);
+    if (!is_valid_ptr(entries) || cnt <= 0 || cnt > 128) {
+        return 0u;
+    }
+    for (int i = cnt - 1; i >= 0; i--) {
+        uint32_t ent = entries + (uint32_t)i * 16u;
+        uint32_t cand = rd32(ent, 4u);
+        if (is_valid_ptr(cand)) {
+            uint32_t vtv = rd32(cand, 0u);
+            if (is_valid_ptr(vtv) && (vtv & 0xfffu) == 0xbd8u) {
+                return cand;
+            }
+            uint32_t inner = rd32(cand, 0x18u);
+            if (is_valid_ptr(inner)) {
+                uint32_t inner_vtv = rd32(inner, 0u);
+                if (is_valid_ptr(inner_vtv) && (inner_vtv & 0xfffu) == 0xbd8u) {
+                    return inner;
+                }
+            }
+        }
+    }
+    return 0u;
+}
+
 static void handle_fn_touch(volatile struct mt_full_state *s, uint32_t mouse) {
     uint32_t lib = s->lib_base;
     int16_t x = 0, y = 0;
@@ -559,9 +597,22 @@ static void handle_fn_touch(volatile struct mt_full_state *s, uint32_t mouse) {
     s->last_y = y;
     s->last_action = 150u; /* reached handle_fn_touch */
 
+    uint32_t view_fn = find_fn_menu_view(s);
+    if (!view_fn) {
+        s->last_err = 151u; /* view_fn not resolved, fallback to enter */
+        push_async_event(s, MT_EVT_KEY_ENTER, 2u);
+        record_event(s, MT_ACT_FN_ENTER, 0u, x, y, 0u, 0u, 0u);
+        return;
+    }
+
+    uint32_t vtv = rd32(view_fn, 0u);
+    uint32_t view4_base = vtv - MT_OFFSET_VTV_VIEW_FN;
+
     /* Tap outside Fn menu grid (upper screen area) -> Cancel/dismiss Fn menu */
     if (y < 260) {
-        push_async_event(s, MT_EVT_KEY_FN, 2u);
+        void (*fn_action)(uint32_t, int) = (void *)(view4_base + MT_OFFSET_FN_ACTION + 1u);
+        fn_action(view_fn, 5); /* Action 5: closeView(0x44) */
+        push_async_event(s, MT_EVT_KEY_FN, 2u); /* Fallback dismiss */
         record_event(s, MT_ACT_FN_CANCEL, 0u, x, y, 0u, 0u, 0u);
         return;
     }
@@ -575,46 +626,25 @@ static void handle_fn_touch(volatile struct mt_full_state *s, uint32_t mouse) {
     uint32_t target_idx = (uint32_t)(row * 6 + col);
     if (target_idx > 11u) target_idx = 11u;
 
-    /* Locate active ViewFnMenu instance from pViewManager */
-    uint32_t vm_ptr = *(volatile uint32_t *)(lib + MT_OFFSET_P_VIEW_MGR);
-    uint32_t view_fn = 0;
-    if (vm_ptr > 0x10000000u) {
-        uint32_t count = *(volatile uint32_t *)(vm_ptr);
-        uint32_t stack = *(volatile uint32_t *)(vm_ptr + 0x20u);
-        if (count > 0 && stack > 0x10000000u) {
-            view_fn = *(volatile uint32_t *)(stack + (count - 1u) * 16u + 4u);
-        }
-    }
-
-    if (!view_fn || view_fn < 0x10000000u) {
-        s->last_err = 151u; /* view_fn not resolved, fallback to enter */
-        push_async_event(s, MT_EVT_KEY_ENTER, 2u);
-        record_event(s, MT_ACT_FN_ENTER, target_idx, x, y, 0u, 0u, 0u);
-        return;
-    }
-
-    uint32_t vtv = rd32(view_fn, 0u);
-    if ((vtv & 0xfffu) != 0xbd8u) {
-        s->last_err = 152u; /* vtable mismatch */
-        s->last_target = vtv;
-        push_async_event(s, MT_EVT_KEY_ENTER, 2u);
-        record_event(s, MT_ACT_FN_ENTER, target_idx, x, y, 0u, 0u, 0u);
-        return;
-    }
-
-    uint32_t view4_base = vtv - MT_OFFSET_VTV_VIEW_FN;
     uint32_t cur_idx = rd32(view_fn, 0x17cu);
 
     if (cur_idx != target_idx) {
         /* First tap: move highlight to target tile */
         *(volatile uint32_t *)(view_fn + 0x17cu) = target_idx;
+        *(volatile uint32_t *)(view_fn + 0x224u) = 0xffffffffu;
         uint32_t param = rd32(view_fn, 0x188u + target_idx * 4u);
         void (*set_cursor)(uint32_t, uint32_t) = (void *)(view4_base + MT_OFFSET_FN_SET_CURSOR + 1u);
+        void (*update_tile)(uint32_t) = (void *)(view4_base + MT_OFFSET_FN_UPDATE_TILE + 1u);
+        void (*notify_wgt)(uint32_t) = (void *)(view4_base + MT_OFFSET_FN_NOTIFY + 1u);
         set_cursor(view_fn, param);
+        update_tile(view_fn);
+        notify_wgt(view_fn);
         record_event(s, MT_ACT_FN_SELECT, target_idx, x, y, cur_idx, 0u, 0u);
     } else {
         /* Already selected (or double tap): activate/enter tile */
-        push_async_event(s, MT_EVT_KEY_ENTER, 2u);
+        void (*fn_action)(uint32_t, int) = (void *)(view4_base + MT_OFFSET_FN_ACTION + 1u);
+        fn_action(view_fn, 18); /* Action 18: open sub-dialogue */
+        push_async_event(s, MT_EVT_KEY_ENTER, 2u); /* Fallback enter */
         record_event(s, MT_ACT_FN_ENTER, target_idx, x, y, cur_idx, 0u, 0u);
     }
 }
