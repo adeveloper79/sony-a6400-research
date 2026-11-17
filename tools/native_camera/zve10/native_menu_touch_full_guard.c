@@ -22,7 +22,7 @@
 #define HOOK_SIZE           12u
 #define CODE_CAP            8192u
 #define STATE_CAP           1760u
-#define STATE_SIZE          648u
+#define STATE_SIZE          656u
 #define REQ_MAGIC           0x4d544652u  /* "MTFR" */
 #define STATE_MAGIC         0x4d544632u  /* "MTF2" */
 #define PROTO_VER           2u
@@ -59,6 +59,8 @@ struct mt_full_state {
     uint32_t view_base;
     uint32_t caution_base;
     uint32_t cached_menu;
+    uint32_t view4_base;
+    uint32_t cached_fn_view;
     struct mt_full_event events[EVENT_CAP];
 };
 
@@ -297,6 +299,11 @@ int main(int argc, char **argv) {
         return 8;
     }
 
+    uint32_t view4_base = find_lib_base(pid, "viewUnified4.so");
+    if (!view4_base) {
+        view4_base = 0x2c100000u; /* Fallback to standard ZV-E10 mapping */
+    }
+
     uint32_t code_addr = lib_base + OFFSET_CODE;
     uint32_t state_addr = lib_base + OFFSET_STATE;
     uint32_t hook_rel = lib_base + OFFSET_HOOK_REL;
@@ -392,6 +399,8 @@ int main(int argc, char **argv) {
         state_init.view_base = view_base;
         state_init.caution_base = caution_base;
         state_init.cached_menu = 0u;
+        state_init.view4_base = view4_base;
+        state_init.cached_fn_view = 0u;
 
         if (writemem(fd, state_addr, &state_init, sizeof(state_init))) {
             writemem(fd, code_addr, zeros, h[3]);

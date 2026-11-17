@@ -38,6 +38,7 @@
 
 /* viewUnified4.so relative offsets */
 #define MT_OFFSET_VTV_VIEW_FN      0x00317bd8u /* ViewFnMenu primary vtable offset */
+#define MT_OFFSET_VTV_VIEW_FN_SEC  0x00317d84u /* ViewFnMenu secondary vtable offset */
 #define MT_OFFSET_FN_SET_CURSOR    0x00227bccu /* ViewFnMenu::setCursorFocus (Thumb +1) */
 #define MT_OFFSET_FN_NOTIFY        0x0022a0ceu /* ViewFnMenu::notifyLayout (Thumb +1) */
 #define MT_OFFSET_FN_UPDATE_TILE   0x0022c438u /* ViewFnMenu::updateTileVisual (Thumb +1) */
@@ -114,6 +115,8 @@ struct mt_full_state {
     uint32_t view_base;
     uint32_t caution_base;
     uint32_t cached_menu;
+    uint32_t view4_base;
+    uint32_t cached_fn_view;
     struct mt_full_event events[MT_EVENT_CAP];
 };
 
@@ -586,6 +589,86 @@ static void push_key_click(volatile struct mt_full_state *s, uint32_t key) {
     push_async_event(s, key, 2u); /* Key up */
 }
 
+static uint32_t find_fn_menu_view(volatile struct mt_full_state *s) {
+    uint32_t v4_base = s->view4_base ? s->view4_base : 0x2c100000u;
+    uint32_t vtv = v4_base + MT_OFFSET_VTV_VIEW_FN;
+    uint32_t sec_vtv = v4_base + MT_OFFSET_VTV_VIEW_FN_SEC;
+
+    /* 1. Fast path: check cached instance */
+    uint32_t cached = s->cached_fn_view;
+    if (is_valid_ptr(cached) && rd32(cached, 0u) == vtv && rd32(cached, 0x28u) == sec_vtv) {
+        return cached;
+    }
+
+    /* 2. Check ViewManager */
+    uint32_t vm = rd32(s->lib_base + MT_OFFSET_VIEW_MGR_PTR, 0u);
+    if (!is_valid_ptr(vm)) {
+        uint32_t got_vm = rd32(s->lib_base + 0x013dc7b4u, 0u); /* GOT for pViewManager */
+        if (is_valid_ptr(got_vm)) vm = rd32(got_vm, 0u);
+    }
+    if (!is_valid_ptr(vm)) {
+        uint32_t got_old = rd32(s->lib_base + MT_OFFSET_VIEW_MGR_GOT, 0u);
+        if (is_valid_ptr(got_old)) vm = rd32(got_old, 0u);
+    }
+    if (is_valid_ptr(vm)) {
+        int cnt = (int)rd32(vm, 0u);
+        if (cnt > 0 && cnt <= 128) {
+            uint32_t views_arr = rd32(vm, 4u);
+            if (is_valid_ptr(views_arr)) {
+                for (int i = 0; i < cnt; i++) {
+                    uint32_t vwrap = rd32(views_arr, (uint32_t)i * 4u);
+                    if (is_valid_ptr(vwrap)) {
+                        if (rd32(vwrap, 0u) == vtv && rd32(vwrap, 0x28u) == sec_vtv) {
+                            s->cached_fn_view = vwrap;
+                            return vwrap;
+                        }
+                        uint32_t inner = rd32(vwrap, 0x18u);
+                        if (is_valid_ptr(inner) && rd32(inner, 0u) == vtv && rd32(inner, 0x28u) == sec_vtv) {
+                            s->cached_fn_view = inner;
+                            return inner;
+                        }
+                    }
+                }
+            }
+            uint32_t entries = rd32(vm, 0x20u);
+            if (is_valid_ptr(entries)) {
+                for (int i = 0; i < cnt; i++) {
+                    uint32_t ent = entries + (uint32_t)i * 16u;
+                    uint32_t vid = rd32(ent, 8u);
+                    uint32_t vwrap = rd32(ent, 4u);
+                    if (is_valid_ptr(vwrap)) {
+                        if (vid == 0x00011d76u) {
+                            s->cached_fn_view = vwrap;
+                            return vwrap;
+                        }
+                        if (rd32(vwrap, 0u) == vtv && rd32(vwrap, 0x28u) == sec_vtv) {
+                            s->cached_fn_view = vwrap;
+                            return vwrap;
+                        }
+                        uint32_t inner = rd32(vwrap, 0x18u);
+                        if (is_valid_ptr(inner)) {
+                            if (vid == 0x00011d76u || (rd32(inner, 0u) == vtv && rd32(inner, 0x28u) == sec_vtv)) {
+                                s->cached_fn_view = inner;
+                                return inner;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /* 3. Heap search: scan primary heap [0x00016000, 0x0045f000] */
+    for (uint32_t p = 0x00016000u; p < 0x0045f000u; p += 4u) {
+        if (rd32(p, 0u) == vtv && rd32(p, 0x28u) == sec_vtv) {
+            s->cached_fn_view = p;
+            return p;
+        }
+    }
+
+    return 0u;
+}
+
 static void handle_fn_touch(volatile struct mt_full_state *s, uint32_t mouse) {
     uint32_t lib = s->lib_base;
     int16_t x = 0, y = 0;
@@ -619,38 +702,71 @@ static void handle_fn_touch(volatile struct mt_full_state *s, uint32_t mouse) {
     uint32_t target_idx = (uint32_t)(row * 6 + col);
     if (target_idx > 11u) target_idx = 11u;
 
-    /* 3. Check if already on target tile */
-    if (s->last_action == MT_ACT_FN_SELECT && s->last_target == target_idx) {
-        /* Second tap on same tile: Open setting via Center button */
-        push_key_click(s, MT_EVT_KEY_ENTER);
-        record_event(s, MT_ACT_FN_ENTER, target_idx, x, y, 0u, 0u, 0u);
-        s->last_action = MT_ACT_FN_ENTER;
+    /* 3. Locate ViewFnMenu instance */
+    uint32_t view_fn = find_fn_menu_view(s);
+    if (view_fn) {
+        uint32_t cur_idx = rd32(view_fn, 0x17cu);
+        if (cur_idx > 11u) cur_idx = 0u;
+
+        uint32_t v4_base = s->view4_base ? s->view4_base : 0x2c100000u;
+        void (*fn_action)(uint32_t, int) = (void *)(v4_base + MT_OFFSET_FN_ACTION + 1u);
+
+        if (cur_idx == target_idx) {
+            /* Second tap on same tile: open setting dialogue */
+            fn_action(view_fn, 4); /* Action 4 = DECIDE / ENTER */
+            record_event(s, MT_ACT_FN_ENTER, target_idx, x, y, cur_idx, target_idx, 0u);
+            s->last_action = MT_ACT_FN_ENTER;
+            s->last_target = target_idx;
+            s->last_err = 0u;
+            return;
+        }
+
+        /* Navigate to target tile via direct ProductAction */
+        int cur_row = (int)cur_idx / 6;
+        int cur_col = (int)cur_idx % 6;
+        int d_row = row - cur_row;
+        int d_col = col - cur_col;
+
+        /* Vertical step */
+        if (d_row > 0) {
+            fn_action(view_fn, 3); /* Action 3 = DOWN */
+        } else if (d_row < 0) {
+            fn_action(view_fn, 2); /* Action 2 = UP */
+        }
+
+        /* Horizontal steps */
+        if (d_col > 0) {
+            for (int k = 0; k < d_col; k++) fn_action(view_fn, 1); /* Action 1 = RIGHT */
+        } else if (d_col < 0) {
+            for (int k = 0; k < -d_col; k++) fn_action(view_fn, 0); /* Action 0 = LEFT */
+        }
+
+        uint32_t new_idx = rd32(view_fn, 0x17cu);
+        s->last_target = new_idx;
+        s->last_action = MT_ACT_FN_SELECT;
+        record_event(s, MT_ACT_FN_SELECT, new_idx, x, y, cur_idx, target_idx, 0u);
         s->last_err = 0u;
         return;
     }
 
-    /* 4. Relative navigation to target tile from tracked position */
+    /* Fallback if ViewFnMenu view not found: key event simulation */
+    s->last_err = 301u;
+    if (s->last_action == MT_ACT_FN_SELECT && s->last_target == target_idx) {
+        push_key_click(s, MT_EVT_KEY_ENTER);
+        record_event(s, MT_ACT_FN_ENTER, target_idx, x, y, 0u, 0u, 0u);
+        s->last_action = MT_ACT_FN_ENTER;
+        return;
+    }
+
     uint32_t cur = s->last_target;
     if (cur > 11u) cur = 0u;
-
     int cur_row = (int)cur / 6;
     int cur_col = (int)cur % 6;
     int d_row = row - cur_row;
     int d_col = col - cur_col;
 
-    /* Vertical movement */
-    if (d_row > 0) {
-        push_key_click(s, MT_EVT_KEY_DOWN);
-    } else if (d_row < 0) {
-        push_key_click(s, MT_EVT_KEY_UP);
-    }
-
-    /* Horizontal movement via shortest circular path on 6-column ring */
-    if (d_col > 3) {
-        d_col -= 6;
-    } else if (d_col < -3) {
-        d_col += 6;
-    }
+    if (d_row > 0) push_key_click(s, MT_EVT_KEY_DOWN);
+    else if (d_row < 0) push_key_click(s, MT_EVT_KEY_UP);
 
     if (d_col > 0) {
         for (int k = 0; k < d_col; k++) push_key_click(s, MT_EVT_KEY_RIGHT);

@@ -90,11 +90,17 @@ def run_cmd(cam, cmd, timeout=5.0):
 
 def execute_dump(cam):
     print("[+] Reading state block from camera DRAM...")
+    time.sleep(1.5)
+    try:
+        cam.readHasp()
+    except Exception:
+        pass
+
     cam.setTerminalEnable(False)
-    time.sleep(0.1)
+    time.sleep(0.2)
     cam.setTerminalEnable(True)
-    time.sleep(0.4)
-    for _ in range(10):
+    time.sleep(1.0)
+    for _ in range(15):
         cam.dev.readTerminal()
         time.sleep(0.05)
 
@@ -108,7 +114,7 @@ def execute_dump(cam):
     print(f"\n=== GOT ENTRY FOR g_pEvtMgr AT 0x{got_evt:08x} ===")
     print(dump_got)
 
-    dump_cmd = f"dd if=/proc/157/mem bs=1 skip={state_addr} count=648 2>/dev/null | busybox xxd -p"
+    dump_cmd = f"dd if=/proc/157/mem bs=1 skip={state_addr} count=656 2>/dev/null | busybox xxd -p"
     out_dump = run_cmd(cam, dump_cmd)
     
     # Extract hex string
@@ -118,16 +124,17 @@ def execute_dump(cam):
         if line and all(c in "0123456789abcdefABCDEF" for c in line):
             hex_str += line
 
-    if len(hex_str) < 144:
+    if len(hex_str) < 160:
         print(f"[-] Truncated hex received: {hex_str}")
         print(out_dump)
         return
 
-    raw = bytes.fromhex(hex_str[:1296])
-    fields = struct.unpack("<IIIIIIIIiiIiiIIIII", raw[:72])
+    raw = bytes.fromhex(hex_str[:1312])
+    fields = struct.unpack("<IIIIIIIIiiIiiIIIIIII", raw[:80])
     (magic, version, enabled, count, inflight, capacity,
      last_action, last_target, last_x, last_y, last_err,
-     press_x, press_y, press_valid, lib_base, view_base, caution_base, cached_menu) = fields
+     press_x, press_y, press_valid, lib_base, view_base, caution_base, cached_menu,
+     view4_base, cached_fn_view) = fields
 
     print("\n" + "=" * 55)
     print("=== SONY ZV-E10 TOUCH MOD DRAM TELEMETRY ===")
@@ -148,10 +155,12 @@ def execute_dump(cam):
     print(f"viewUnified:   0x{view_base:08x}")
     print(f"CautionConfig: 0x{caution_base:08x}")
     print(f"Cached Menu:   0x{cached_menu:08x}")
+    print(f"viewUnified4:  0x{view4_base:08x}")
+    print(f"Cached ViewFn: 0x{cached_fn_view:08x}")
     print("=" * 55)
 
     print("\n=== RECENT EVENTS (LAST 16) ===")
-    ev_raw = raw[72:72 + 16 * 36]
+    ev_raw = raw[80:80 + 16 * 36]
     for i in range(16):
         chunk = ev_raw[i*36:(i+1)*36]
         if len(chunk) < 36:

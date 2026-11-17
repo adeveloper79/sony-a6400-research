@@ -46,7 +46,7 @@ class ZVE10MenuTouchFullTests(unittest.TestCase):
         code_bytes = manifest["code_bytes"]
         self.assertLessEqual(code_bytes, 8192)
         self.assertEqual(code_bytes % 4, 0)
-        self.assertEqual(manifest["state_bytes"], 648)
+        self.assertEqual(manifest["state_bytes"], 656)
 
         code_addr = int(manifest["code_address"], 16)
         for key in ("rel_entry", "prs_entry"):
@@ -76,7 +76,7 @@ class ZVE10MenuTouchFullTests(unittest.TestCase):
             self.assertEqual(hdr[4] & 1, 1, "rel_offset must have bit 0 set")
             self.assertEqual(hdr[5] & 1, 1, "prs_offset must have bit 0 set")
             self.assertEqual(hdr[6], expected_sum, "FNV-1a checksum must match")
-            self.assertEqual(hdr[7], 648, "state_size must be 648")
+            self.assertEqual(hdr[7], 656, "state_size must be 656")
             self.assertEqual(hdr[8], 0x00618000, "hook_rel must match dispatchMouseRelease")
             self.assertEqual(hdr[9], 0x0061810C, "hook_prs must match dispatchMousePress")
             self.assertEqual(raw[40:], payload, "payload in req must match payload.bin")
