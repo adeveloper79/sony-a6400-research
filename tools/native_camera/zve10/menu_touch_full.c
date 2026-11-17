@@ -22,7 +22,8 @@
 #define MT_OFFSET_INHERITED  0x00613bd1u  /* Widget::calcFinalMode */
 #define MT_OFFSET_CREATE_EVT 0x0012c651u  /* Event factory: create_event(ulong id, u8 type) */
 #define MT_OFFSET_PUSH_EVT   0x0012c62du  /* Event dispatcher: push_event(Event* ev) */
-#define MT_OFFSET_P_VIEW_MGR 0x0149221cu  /* pViewManager (.bss in libObj.so) */
+#define MT_OFFSET_VIEW_MGR_PTR 0x0145977cu /* ViewManager instance pointer in libObj.so .bss */
+#define MT_OFFSET_VIEW_MGR_GOT 0x013dc758u /* GOT entry for ViewManager pointer */
 
 /* viewUnified2.so relative offsets */
 #define MT_OFFSET_VTV_PAS_TAB 0x00c09e28u /* PAS_MenuListTab vtable addr pt (verified live: 0x168d8e28 - 0x15ccf000) */
@@ -42,8 +43,12 @@
 #define MT_OFFSET_FN_UPDATE_TILE   0x0022c438u /* ViewFnMenu::updateTileVisual (Thumb +1) */
 #define MT_OFFSET_FN_ACTION        0x0023249eu /* ViewFnMenu::ProductAction (Thumb +1) */
 
-/* Key event codes */
-#define MT_EVT_KEY_ENTER           0x15010052u /* Physical Center button (ENTER) */
+/* Key event codes (category 0x1501: 4=Center/Enter, 5=Up, 6=Down, 7=Left, 8=Right, F=Fn) */
+#define MT_EVT_KEY_ENTER           0x15010042u /* Physical Center button (ENTER/DECIDE) */
+#define MT_EVT_KEY_UP              0x15010052u /* Physical Up button */
+#define MT_EVT_KEY_DOWN            0x15010062u /* Physical Down button */
+#define MT_EVT_KEY_LEFT            0x15010072u /* Physical Left button */
+#define MT_EVT_KEY_RIGHT           0x15010082u /* Physical Right button */
 #define MT_EVT_KEY_FN              0x150100f2u /* Physical Fn key */
 
 /* CautionConfig.so relative offsets */
@@ -185,31 +190,56 @@ static void push_async_event(volatile struct mt_full_state *s, uint32_t event_id
 
 static uint32_t find_setting_menu_view(volatile struct mt_full_state *s, uint32_t menu) {
     uint32_t vid = rd32(menu, 0x14cu);
-    uint32_t vm = rd32(s->lib_base + MT_OFFSET_P_VIEW_MGR, 0u);
-    if (!vm) {
+    uint32_t vm = rd32(s->lib_base + MT_OFFSET_VIEW_MGR_PTR, 0u);
+    if (!is_valid_ptr(vm)) {
+        uint32_t got_vm = rd32(s->lib_base + MT_OFFSET_VIEW_MGR_GOT, 0u);
+        if (is_valid_ptr(got_vm)) vm = rd32(got_vm, 0u);
+    }
+    if (!is_valid_ptr(vm)) {
         return 0u;
     }
     int cnt = (int)rd32(vm, 0u);
-    uint32_t entries = rd32(vm, 0x20u);
-    if (!entries || cnt <= 0 || cnt > 128) {
+    if (cnt <= 0 || cnt > 128) {
         return 0u;
     }
     uint32_t vtv = s->view_base + MT_OFFSET_VTV_SETTING_MENU;
-    for (int i = 0; i < cnt; i++) {
-        uint32_t ent = entries + (uint32_t)i * 16u;
-        uint32_t vwrap = rd32(ent, 4u);
-        if (!vwrap || rd32(ent, 8u) != vid) {
-            continue;
+
+    /* Path 1: Check views pointer array at [vm + 4] */
+    uint32_t views_arr = rd32(vm, 4u);
+    if (is_valid_ptr(views_arr)) {
+        for (int i = 0; i < cnt; i++) {
+            uint32_t vwrap = rd32(views_arr, (uint32_t)i * 4u);
+            if (is_valid_ptr(vwrap)) {
+                if (rd32(vwrap, 0u) == vtv) {
+                    return vwrap;
+                }
+                uint32_t inner = rd32(vwrap, 0x18u);
+                if (is_valid_ptr(inner) && rd32(inner, 0u) == vtv) {
+                    return inner;
+                }
+            }
         }
-        if (rd32(vwrap, 0u) == vtv) {
+    }
+
+    /* Path 2: Check entries table at [vm + 0x20] */
+    uint32_t entries = rd32(vm, 0x20u);
+    if (is_valid_ptr(entries)) {
+        for (int i = 0; i < cnt; i++) {
+            uint32_t ent = entries + (uint32_t)i * 16u;
+            uint32_t vwrap = rd32(ent, 4u);
+            if (!is_valid_ptr(vwrap) || (vid && rd32(ent, 8u) != vid)) {
+                continue;
+            }
+            if (rd32(vwrap, 0u) == vtv) {
+                return vwrap;
+            }
+            uint32_t inner = rd32(vwrap, 0x18u);
+            if (is_valid_ptr(inner) && rd32(inner, 0u) == vtv) {
+                return inner;
+            }
+            /* Fallback: if vid matched, vwrap is our owning view instance */
             return vwrap;
         }
-        uint32_t inner = rd32(vwrap, 0x18u);
-        if (inner && rd32(inner, 0u) == vtv) {
-            return inner;
-        }
-        /* Fallback: if vid matched, vwrap is our owning view instance */
-        return vwrap;
     }
     return 0u;
 }
@@ -538,7 +568,8 @@ static void handle_menu_touch(volatile struct mt_full_state *s, uint32_t mouse) 
                         action(sm_view, 11);
                     } else {
                         s->last_err = 111u; /* sm_view not found */
-                        push_async_event(s, 0x15010052u, 2u);
+                        push_async_event(s, MT_EVT_KEY_ENTER, 4u);
+                        push_async_event(s, MT_EVT_KEY_ENTER, 2u);
                     }
                 }
                 record_event(s, MT_ACT_ROW_ENTER, r + 1u, x, y, (uint32_t)is_popup, page_sel, row_sel);
@@ -552,38 +583,69 @@ static void handle_menu_touch(volatile struct mt_full_state *s, uint32_t mouse) 
 
 static uint32_t find_fn_menu_view(volatile struct mt_full_state *s) {
     uint32_t lib = s->lib_base;
-    uint32_t vm = rd32(lib + MT_OFFSET_P_VIEW_MGR, 0u);
+    uint32_t vm = rd32(lib + MT_OFFSET_VIEW_MGR_PTR, 0u);
+    if (!is_valid_ptr(vm)) {
+        uint32_t got_vm = rd32(lib + MT_OFFSET_VIEW_MGR_GOT, 0u);
+        if (is_valid_ptr(got_vm)) vm = rd32(got_vm, 0u);
+    }
     if (!is_valid_ptr(vm)) {
         s->last_err = 153u;
         s->last_target = vm;
         return 0u;
     }
     int cnt = (int)rd32(vm, 0u);
-    uint32_t entries = rd32(vm, 0x20u);
-    if (!is_valid_ptr(entries) || cnt <= 0 || cnt > 128) {
+    if (cnt <= 0 || cnt > 128) {
         s->last_err = 154u;
         s->last_target = (uint32_t)cnt;
         return 0u;
     }
     uint32_t top_vtv = 0u;
-    for (int i = cnt - 1; i >= 0; i--) {
-        uint32_t ent = entries + (uint32_t)i * 16u;
-        uint32_t cand = rd32(ent, 4u);
-        if (is_valid_ptr(cand)) {
-            uint32_t vtv = rd32(cand, 0u);
-            if (is_valid_ptr(vtv)) {
-                if (!top_vtv) top_vtv = vtv;
-                /* ViewFnMenu primary vtable offset has low 12 bits 0xbd8 */
-                if ((vtv & 0xfffu) == 0xbd8u) {
-                    return cand;
-                }
-                /* Secondary vtable offset is 0x317d84 (low 12 bits 0xd84) */
-                if ((vtv & 0xfffu) == 0xd84u) {
-                    return cand - 0x28u;
+
+    /* Path 1: views pointer array at [vm + 4] (array of View* pointers) */
+    uint32_t views_arr = rd32(vm, 4u);
+    if (is_valid_ptr(views_arr)) {
+        for (int i = cnt - 1; i >= 0; i--) {
+            uint32_t cand = rd32(views_arr, (uint32_t)i * 4u);
+            if (is_valid_ptr(cand)) {
+                uint32_t vtv = rd32(cand, 0u);
+                if (is_valid_ptr(vtv)) {
+                    if (!top_vtv) top_vtv = vtv;
+                    /* ViewFnMenu primary vtable offset has low 12 bits 0xbd8 */
+                    if ((vtv & 0xfffu) == 0xbd8u) {
+                        return cand;
+                    }
+                    /* Secondary vtable offset is 0x317d84 (low 12 bits 0xd84) */
+                    if ((vtv & 0xfffu) == 0xd84u) {
+                        return cand - 0x28u;
+                    }
                 }
             }
         }
     }
+
+    /* Path 2: entries table at [vm + 0x20] (16 bytes per entry, View* at offset 4) */
+    uint32_t entries = rd32(vm, 0x20u);
+    if (is_valid_ptr(entries)) {
+        for (int i = cnt - 1; i >= 0; i--) {
+            uint32_t ent = entries + (uint32_t)i * 16u;
+            uint32_t cand = rd32(ent, 4u);
+            if (is_valid_ptr(cand)) {
+                uint32_t vtv = rd32(cand, 0u);
+                if (is_valid_ptr(vtv)) {
+                    if (!top_vtv) top_vtv = vtv;
+                    /* ViewFnMenu primary vtable offset has low 12 bits 0xbd8 */
+                    if ((vtv & 0xfffu) == 0xbd8u) {
+                        return cand;
+                    }
+                    /* Secondary vtable offset is 0x317d84 (low 12 bits 0xd84) */
+                    if ((vtv & 0xfffu) == 0xd84u) {
+                        return cand - 0x28u;
+                    }
+                }
+            }
+        }
+    }
+
     s->last_err = 156u;
     s->last_target = ((uint32_t)(cnt & 0xff) << 16) | (top_vtv & 0xffffu);
     return 0u;
@@ -626,9 +688,7 @@ static void handle_fn_touch(volatile struct mt_full_state *s, uint32_t mouse) {
     /* 3. Try to locate ViewFnMenu instance */
     uint32_t view_fn = find_fn_menu_view(s);
     if (!view_fn) {
-        /* ViewFnMenu not resolved yet: fallback to synthetic Enter click */
-        push_async_event(s, MT_EVT_KEY_ENTER, 4u);
-        push_async_event(s, MT_EVT_KEY_ENTER, 2u);
+        /* ViewFnMenu not resolved yet: do not send spurious directional key events */
         record_event(s, MT_ACT_FN_ENTER, target_idx, x, y, 0u, 0u, 0u);
         s->last_action = MT_ACT_FN_ENTER;
         return;
