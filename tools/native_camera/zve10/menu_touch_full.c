@@ -43,6 +43,8 @@
 #define MT_OFFSET_FN_NOTIFY        0x0022a0ceu /* ViewFnMenu::notifyLayout (Thumb +1) */
 #define MT_OFFSET_FN_UPDATE_TILE   0x0022c438u /* ViewFnMenu::updateTileVisual (Thumb +1) */
 #define MT_OFFSET_FN_ACTION        0x0023249eu /* ViewFnMenu::ProductAction (Thumb +1) */
+#define MT_OFFSET_FN_SHOW_CURSOR   0x002284b4u /* ViewFnMenu::showCursor (Thumb +1) */
+#define MT_OFFSET_FN_UPDATE_SEL    0x00227af4u /* ViewFnMenu::updateSelection (Thumb +1) */
 
 /* Key event codes (category 0x1501: 4=Center/Enter, 5=Up, 6=Down, 7=Left, 8=Right, F=Fn) */
 #define MT_EVT_KEY_ENTER           0x15010042u /* Physical Center button (ENTER/DECIDE) */
@@ -134,6 +136,14 @@ static inline uint32_t rd32(uint32_t addr, unsigned off) {
 
 static inline unsigned rd8(uint32_t addr, unsigned off) {
     return *(const volatile uint8_t *)(addr + off);
+}
+
+static inline void wr32(uint32_t addr, unsigned off, uint32_t val) {
+    *(volatile uint32_t *)(addr + off) = val;
+}
+
+static inline void wr8(uint32_t addr, unsigned off, uint8_t val) {
+    *(volatile uint8_t *)(addr + off) = val;
 }
 
 static uint32_t get_tid(void) {
@@ -669,6 +679,36 @@ static uint32_t find_fn_menu_view(volatile struct mt_full_state *s) {
     return 0u;
 }
 
+static void select_fn_tile(uint32_t view_fn, uint32_t target_idx, uint32_t v4_base) {
+    /* 1. Ensure focus mode is active and clear busy/animation flags */
+    wr8(view_fn, 0x221u, 1u);
+    wr8(view_fn, 0x220u, 0u);
+    wr8(view_fn, 0x3b4u, 0u);
+    wr32(view_fn, 0x398u, 1u);
+
+    void (*show_cursor)(uint32_t) = (void *)(v4_base + MT_OFFSET_FN_SHOW_CURSOR + 1u);
+    show_cursor(view_fn);
+
+    /* 2. Directly set selected tile index */
+    wr32(view_fn, 0x17cu, target_idx);
+    wr32(view_fn, 0x224u, 0xffffffffu);
+
+    /* 3. Redraw visual highlight for target tile */
+    void (*update_visual)(uint32_t) = (void *)(v4_base + MT_OFFSET_FN_UPDATE_TILE + 1u);
+    update_visual(view_fn);
+
+    /* 4. Update item selection model */
+    void (*update_sel)(uint32_t) = (void *)(v4_base + MT_OFFSET_FN_UPDATE_SEL + 1u);
+    update_sel(view_fn);
+
+    /* 5. Set widget focus */
+    uint32_t widget_id = rd32(view_fn, (target_idx + 0x62u) * 4u);
+    if (widget_id) {
+        void (*set_cursor)(uint32_t, uint32_t) = (void *)(v4_base + MT_OFFSET_FN_SET_CURSOR + 1u);
+        set_cursor(view_fn, widget_id);
+    }
+}
+
 static void handle_fn_touch(volatile struct mt_full_state *s, uint32_t mouse) {
     uint32_t lib = s->lib_base;
     int16_t x = 0, y = 0;
@@ -711,7 +751,9 @@ static void handle_fn_touch(volatile struct mt_full_state *s, uint32_t mouse) {
         uint32_t v4_base = s->view4_base ? s->view4_base : 0x2c100000u;
         void (*fn_action)(uint32_t, int) = (void *)(v4_base + MT_OFFSET_FN_ACTION + 1u);
 
-        if (cur_idx == target_idx) {
+        uint8_t focus_active = (uint8_t)rd8(view_fn, 0x221u);
+
+        if (focus_active && cur_idx == target_idx) {
             /* Second tap on same tile: open setting dialogue */
             fn_action(view_fn, 4); /* Action 4 = DECIDE / ENTER */
             record_event(s, MT_ACT_FN_ENTER, target_idx, x, y, cur_idx, target_idx, 0u);
@@ -721,30 +763,12 @@ static void handle_fn_touch(volatile struct mt_full_state *s, uint32_t mouse) {
             return;
         }
 
-        /* Navigate to target tile via direct ProductAction */
-        int cur_row = (int)cur_idx / 6;
-        int cur_col = (int)cur_idx % 6;
-        int d_row = row - cur_row;
-        int d_col = col - cur_col;
+        /* Direct selection of target tile: instantaneous, deterministic, zero dropped steps */
+        select_fn_tile(view_fn, target_idx, v4_base);
 
-        /* Vertical step */
-        if (d_row > 0) {
-            fn_action(view_fn, 3); /* Action 3 = DOWN */
-        } else if (d_row < 0) {
-            fn_action(view_fn, 2); /* Action 2 = UP */
-        }
-
-        /* Horizontal steps */
-        if (d_col > 0) {
-            for (int k = 0; k < d_col; k++) fn_action(view_fn, 1); /* Action 1 = RIGHT */
-        } else if (d_col < 0) {
-            for (int k = 0; k < -d_col; k++) fn_action(view_fn, 0); /* Action 0 = LEFT */
-        }
-
-        uint32_t new_idx = rd32(view_fn, 0x17cu);
-        s->last_target = new_idx;
+        s->last_target = target_idx;
         s->last_action = MT_ACT_FN_SELECT;
-        record_event(s, MT_ACT_FN_SELECT, new_idx, x, y, cur_idx, target_idx, 0u);
+        record_event(s, MT_ACT_FN_SELECT, target_idx, x, y, cur_idx, target_idx, 0u);
         s->last_err = 0u;
         return;
     }
