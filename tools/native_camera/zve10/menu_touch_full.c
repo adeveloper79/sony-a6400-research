@@ -554,30 +554,38 @@ static uint32_t find_fn_menu_view(volatile struct mt_full_state *s) {
     uint32_t lib = s->lib_base;
     uint32_t vm = rd32(lib + MT_OFFSET_P_VIEW_MGR, 0u);
     if (!is_valid_ptr(vm)) {
+        s->last_err = 153u;
+        s->last_target = vm;
         return 0u;
     }
     int cnt = (int)rd32(vm, 0u);
     uint32_t entries = rd32(vm, 0x20u);
     if (!is_valid_ptr(entries) || cnt <= 0 || cnt > 128) {
+        s->last_err = 154u;
+        s->last_target = (uint32_t)cnt;
         return 0u;
     }
+    uint32_t top_vtv = 0u;
     for (int i = cnt - 1; i >= 0; i--) {
         uint32_t ent = entries + (uint32_t)i * 16u;
         uint32_t cand = rd32(ent, 4u);
         if (is_valid_ptr(cand)) {
             uint32_t vtv = rd32(cand, 0u);
-            if (is_valid_ptr(vtv) && (vtv & 0xfffu) == 0xbd8u) {
-                return cand;
-            }
-            uint32_t inner = rd32(cand, 0x18u);
-            if (is_valid_ptr(inner)) {
-                uint32_t inner_vtv = rd32(inner, 0u);
-                if (is_valid_ptr(inner_vtv) && (inner_vtv & 0xfffu) == 0xbd8u) {
-                    return inner;
+            if (is_valid_ptr(vtv)) {
+                if (!top_vtv) top_vtv = vtv;
+                /* ViewFnMenu primary vtable offset has low 12 bits 0xbd8 */
+                if ((vtv & 0xfffu) == 0xbd8u) {
+                    return cand;
+                }
+                /* Secondary vtable offset is 0x317d84 (low 12 bits 0xd84) */
+                if ((vtv & 0xfffu) == 0xd84u) {
+                    return cand - 0x28u;
                 }
             }
         }
     }
+    s->last_err = 156u;
+    s->last_target = ((uint32_t)(cnt & 0xff) << 16) | (top_vtv & 0xffffu);
     return 0u;
 }
 
@@ -595,29 +603,18 @@ static void handle_fn_touch(volatile struct mt_full_state *s, uint32_t mouse) {
 
     s->last_x = x;
     s->last_y = y;
-    s->last_action = 150u; /* reached handle_fn_touch */
 
-    uint32_t view_fn = find_fn_menu_view(s);
-    if (!view_fn) {
-        s->last_err = 151u; /* view_fn not resolved, fallback to enter */
-        push_async_event(s, MT_EVT_KEY_ENTER, 2u);
-        record_event(s, MT_ACT_FN_ENTER, 0u, x, y, 0u, 0u, 0u);
-        return;
-    }
-
-    uint32_t vtv = rd32(view_fn, 0u);
-    uint32_t view4_base = vtv - MT_OFFSET_VTV_VIEW_FN;
-
-    /* Tap outside Fn menu grid (upper screen area) -> Cancel/dismiss Fn menu */
+    /* 1. Tap outside Fn menu grid (upper screen area: y < 260) -> CANCEL / DISMISS Fn menu */
     if (y < 260) {
-        void (*fn_action)(uint32_t, int) = (void *)(view4_base + MT_OFFSET_FN_ACTION + 1u);
-        fn_action(view_fn, 5); /* Action 5: closeView(0x44) */
-        push_async_event(s, MT_EVT_KEY_FN, 2u); /* Fallback dismiss */
+        push_async_event(s, MT_EVT_KEY_FN, 4u);
+        push_async_event(s, MT_EVT_KEY_FN, 2u);
         record_event(s, MT_ACT_FN_CANCEL, 0u, x, y, 0u, 0u, 0u);
+        s->last_action = MT_ACT_FN_CANCEL;
+        s->last_err = 0u;
         return;
     }
 
-    /* Compute column (0..5) and row (0..1) */
+    /* 2. Compute target tile index (2 rows of 6 tiles) */
     int col = ((int)x * 6) / 640;
     if (col < 0) col = 0;
     if (col > 5) col = 5;
@@ -626,6 +623,19 @@ static void handle_fn_touch(volatile struct mt_full_state *s, uint32_t mouse) {
     uint32_t target_idx = (uint32_t)(row * 6 + col);
     if (target_idx > 11u) target_idx = 11u;
 
+    /* 3. Try to locate ViewFnMenu instance */
+    uint32_t view_fn = find_fn_menu_view(s);
+    if (!view_fn) {
+        /* ViewFnMenu not resolved yet: fallback to synthetic Enter click */
+        push_async_event(s, MT_EVT_KEY_ENTER, 4u);
+        push_async_event(s, MT_EVT_KEY_ENTER, 2u);
+        record_event(s, MT_ACT_FN_ENTER, target_idx, x, y, 0u, 0u, 0u);
+        s->last_action = MT_ACT_FN_ENTER;
+        return;
+    }
+
+    uint32_t vtv = rd32(view_fn, 0u);
+    uint32_t view4_base = vtv - MT_OFFSET_VTV_VIEW_FN;
     uint32_t cur_idx = rd32(view_fn, 0x17cu);
 
     if (cur_idx != target_idx) {
@@ -640,12 +650,17 @@ static void handle_fn_touch(volatile struct mt_full_state *s, uint32_t mouse) {
         update_tile(view_fn);
         notify_wgt(view_fn);
         record_event(s, MT_ACT_FN_SELECT, target_idx, x, y, cur_idx, 0u, 0u);
+        s->last_action = MT_ACT_FN_SELECT;
+        s->last_err = 0u;
     } else {
-        /* Already selected (or double tap): activate/enter tile */
+        /* Already selected (or second tap): activate/enter tile */
         void (*fn_action)(uint32_t, int) = (void *)(view4_base + MT_OFFSET_FN_ACTION + 1u);
         fn_action(view_fn, 18); /* Action 18: open sub-dialogue */
-        push_async_event(s, MT_EVT_KEY_ENTER, 2u); /* Fallback enter */
+        push_async_event(s, MT_EVT_KEY_ENTER, 4u);
+        push_async_event(s, MT_EVT_KEY_ENTER, 2u);
         record_event(s, MT_ACT_FN_ENTER, target_idx, x, y, cur_idx, 0u, 0u);
+        s->last_action = MT_ACT_FN_ENTER;
+        s->last_err = 0u;
     }
 }
 
