@@ -611,18 +611,12 @@ static uint32_t find_fn_menu_view(volatile struct mt_full_state *s) {
     uint32_t vtv = v4_base + MT_OFFSET_VTV_VIEW_FN;
     uint32_t sec_vtv = v4_base + MT_OFFSET_VTV_VIEW_FN_SEC;
 
-    /* 1. Fast path: check cached instance (must have valid vtables, layout pointers and index) */
+    /* 1. Fast path: check cached instance */
     uint32_t cached = s->cached_fn_view;
-    if (is_valid_ptr(cached) &&
-        rd32(cached, 0u) == vtv &&
-        rd32(cached, 0x28u) == sec_vtv &&
-        rd32(cached, 0x17cu) <= 11u &&
-        is_valid_ptr(rd32(cached, 0x160u)) &&
-        is_valid_ptr(rd32(cached, 0x16cu))) {
+    if (is_valid_ptr(cached) && rd32(cached, 0u) == vtv && rd32(cached, 0x28u) == sec_vtv && rd32(cached, 0x17cu) <= 11u) {
         return cached;
     }
 
-    /* Invalidate stale cache */
     s->cached_fn_view = 0u;
 
     /* 2. Scan heap downwards from heap top to find active ViewFnMenu */
@@ -635,22 +629,9 @@ static uint32_t find_fn_menu_view(volatile struct mt_full_state *s) {
     for (uint32_t p = heap_top; p >= 0x00016000u; p -= 4u) {
         if (rd32(p, 0u) == vtv && rd32(p, 0x28u) == sec_vtv) {
             uint32_t idx = rd32(p, 0x17cu);
-            if (idx <= 11u && is_valid_ptr(rd32(p, 0x160u)) && is_valid_ptr(rd32(p, 0x16cu))) {
+            if (idx <= 11u) {
                 s->cached_fn_view = p;
                 return p;
-            }
-        }
-    }
-
-    /* Fallback scan if heap break grew beyond primary top */
-    if (heap_top < 0x00800000u) {
-        for (uint32_t p = 0x00800000u - 4u; p > heap_top; p -= 4u) {
-            if (rd32(p, 0u) == vtv && rd32(p, 0x28u) == sec_vtv) {
-                uint32_t idx = rd32(p, 0x17cu);
-                if (idx <= 11u && is_valid_ptr(rd32(p, 0x160u)) && is_valid_ptr(rd32(p, 0x16cu))) {
-                    s->cached_fn_view = p;
-                    return p;
-                }
             }
         }
     }
@@ -695,14 +676,7 @@ static void handle_fn_touch(volatile struct mt_full_state *s, uint32_t mouse) {
 
     /* 1. Tap outside Fn menu grid (upper screen area: y < 260) -> CANCEL / DISMISS Fn menu */
     if (y < 260) {
-        uint32_t view_fn = find_fn_menu_view(s);
-        if (view_fn) {
-            uint32_t v4_base = s->view4_base ? s->view4_base : 0x2c100000u;
-            void (*fn_action)(uint32_t, int) = (void *)(v4_base + MT_OFFSET_FN_ACTION + 1u);
-            step_fn_action(view_fn, 5, fn_action); /* Action 5 = Clean native CloseView */
-        } else {
-            push_key_click(s, MT_EVT_KEY_FN);
-        }
+        push_key_click(s, MT_EVT_KEY_FN);
         record_event(s, MT_ACT_FN_CANCEL, 0u, x, y, 0u, 0u, 0u);
         s->last_action = MT_ACT_FN_CANCEL;
         s->last_err = 0u;
@@ -785,29 +759,6 @@ static void handle_fn_touch(volatile struct mt_full_state *s, uint32_t mouse) {
         }
 
         uint32_t new_idx = rd32(view_fn, 0x17cu);
-
-        /* Automatic stale-cache recovery (e.g. after camera wake from powersave):
-         * If the instance did not respond to ProductAction, invalidate cache and re-scan */
-        if (diff != 0 && new_idx != target_idx) {
-            s->cached_fn_view = 0u;
-            view_fn = find_fn_menu_view(s);
-            if (view_fn) {
-                cur_idx = rd32(view_fn, 0x17cu);
-                if (cur_idx > 11u) cur_idx = 0u;
-                wr8(view_fn, 0x221u, 1u);
-                wr8(view_fn, 0x3b4u, 0u);
-                wr32(view_fn, 0x398u, 1u);
-                diff = ((int)target_idx - (int)cur_idx + 12) % 12;
-                if (diff <= 6) {
-                    for (int k = 0; k < diff; k++) step_fn_action(view_fn, 1, fn_action);
-                } else {
-                    int steps = 12 - diff;
-                    for (int k = 0; k < steps; k++) step_fn_action(view_fn, 0, fn_action);
-                }
-                new_idx = rd32(view_fn, 0x17cu);
-            }
-        }
-
         s->last_target = new_idx;
         s->last_action = MT_ACT_FN_SELECT;
         record_event(s, MT_ACT_FN_SELECT, new_idx, x, y, cur_idx, target_idx, 0u);
@@ -826,10 +777,6 @@ uint32_t mt_full_press(void *system, void *message) {
     __sync_fetch_and_add(&s->inflight, 1u);
     uint32_t result = mt_original_press(system, message);
     if (s->enabled && message) {
-        int (*get_fn_active)(void) = (void *)(s->view_base + MT_OFFSET_FN_EXISTENCE);
-        if (!get_fn_active || !get_fn_active()) {
-            s->cached_fn_view = 0u;
-        }
         unsigned mouse = ((const uint8_t *)message)[0x14];
         if (mouse < 4u) {
             int16_t px = 0, py = 0;
